@@ -135,6 +135,31 @@ Parses `variables.tf` from the accelerator's own bootstrap modules and checks th
 
 If the accelerator changes its schema in a new version, this fails locally instead of failing partway through someone's bootstrap. It skips cleanly when no bootstrap module has been downloaded yet.
 
+## Customizing for your selections
+
+Two files come out of the config phase, both in `<delivery>\config`:
+
+| File | What it is | Who owns it after bootstrap |
+|---|---|---|
+| `inputs.yaml` | Bootstrap inputs: org, subscriptions, approvers, runners, state | You, in the delivery folder. Only re-read on a re-bootstrap |
+| `platform-landing-zone.tfvars` (or `.yaml` for Bicep) | Your landing zone as configuration | Pushed into the **module repo**. After that, changes go through a pull request |
+
+Values that are normally hand-edited are filled in for you. On a re-run only regions, security contact, and subscription placement are patched, so your own edits survive.
+
+| Your choice | What you customize, and where |
+|---|---|
+| **Terraform** | IP ranges, naming, DDoS, policy settings: edit the tfvars before bootstrap, or through a PR afterward |
+| **Bicep** | `platform-landing-zone.yaml`, plus the generated Bicep in the module repo. Also requires User Access Administrator at the root (`/`) scope |
+| **GitHub** | Branch protection, environment reviewers, and repo settings in the GitHub UI |
+| **Azure DevOps** | Approvals and checks on the Apply environment, and the service connection, in the Azure DevOps UI |
+| **Scenario / network type** | Changing topology later means replacing the platform config with another scenario and letting the pipeline apply the difference |
+| **Multi-region** | Extend `starter_locations`. A real multi-entry list is never shrunk on a re-run |
+| **HCP Terraform** | The `cloud {}` block, the `TF_TOKEN_app_terraform_io` secret, removing `-backend-config` flags, and `secrets: inherit`. Eight live checks tell you which is still wrong |
+| **Self-hosted runners** | Needs a second PAT at bootstrap. Address space and subnet prefixes are bootstrap module variables if the defaults collide |
+| **Custom library** | Put custom management groups, archetypes, and policy assignments in `<delivery>\config\lib`. See [samples/lib-pci](samples/lib-pci/README.md) |
+
+If you pick a different Terraform scenario on a re-run, the tool notices the existing platform config no longer matches and asks before replacing it, because replacing discards manual edits.
+
 ## Security
 
 - **Secrets never persisted.** The GitHub PAT and HCP token are read with `Read-Host -AsSecureString`, converted to plaintext only in-memory, and never written to `inputs.yaml` or the state file. `inputs.yaml` references the PAT via the `TF_VAR_github_personal_access_token` environment variable, matching the accelerator's own pattern.
