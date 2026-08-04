@@ -15,7 +15,7 @@
 # 2. Prerequisites - tooling, Azure Owner, resource providers, GitHub, HCP.
 # 3. Generate config - writes inputs.yaml (no hand-editing scattered files).
 # 4. Bootstrap - runs Deploy-Accelerator and translates known errors.
-# 5. Guided next steps - HCP state migration and Phase 3 topology deploy.
+# 5. Guided next steps - HCP state migration and the day-2 operating model.
 #
 # ── Parameters ──────────────────────────────────────────────
 # DeliveryPath       Root folder for this delivery's config/output/state
@@ -461,7 +461,7 @@ try {
 }
 finally { $tok = $null }
 
-# ---- Phase 3: target topology (only if beyond management-only) ---------
+# ---- What happens next + closing summary --------------------------------
 Show-ALZRunSteps -State $state -DataPath $dataPath
 
 Set-ALZCurrentPhase -State $state -Phase 'complete'

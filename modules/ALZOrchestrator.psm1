@@ -4,7 +4,7 @@
 ###########################################################################
 # Purpose: Wrap the real Deploy-Accelerator run, capture its output, and
 #          translate known failures into plain-language fixes. Also render
-#          the guided checklists for the HCP migration and Phase 3.
+#          the guided checklists for the HCP migration and day-2 operations.
 # Author: Zac Larsen
 # Date: Created for the ALZ Accelerator orchestrator app
 #
@@ -12,7 +12,7 @@
 # 1. Ensures the ALZ PowerShell module is installed/current.
 # 2. Runs Deploy-Accelerator against the generated inputs.yaml.
 # 3. Transcribes the run and matches failures against data/traps.json.
-# 4. Renders the HCP-migration and Phase 3 guided steps.
+# 4. Renders the HCP-migration steps and the day-2 operating model.
 # The accelerator itself is unchanged - this only orchestrates it.
 #
 # Prerequisites:
@@ -196,38 +196,46 @@ function Show-ALZHcpSteps {
 function Show-ALZRunSteps {
     param([hashtable]$State, [string]$DataPath)
     $a = $State.answers
-    $scenario = (Get-Content -Path (Join-Path $DataPath 'scenarios.json') -Raw | ConvertFrom-Json).scenarios |
-        Where-Object { $_.key -eq $a.scenario } | Select-Object -First 1
-    Write-ALZSection 'Deploy the target topology (Phase 3, guided)'
-    Write-Host "  Target: $($scenario.name)" -ForegroundColor White
-    Write-Host "  connectivity_type = $($scenario.connectivityType), cost tier: $($scenario.costTier)" -ForegroundColor DarkGray
-    Write-Host ''
-    if ($scenario.connectivityType -eq 'none') {
-        Write-Host '  Target is management-only - the proof run already deployed this end state.' -ForegroundColor White
-        Write-Host '  No separate topology deploy is needed. Add connectivity later by switching scenarios.' -ForegroundColor DarkGray
-        return
+    Write-ALZSection 'What happens from here'
+
+    if ($a.iacType -eq 'bicep') {
+        Write-Host "  Deployed: Bicep platform landing zone (network_type: $($a.bicepNetworkType))" -ForegroundColor White
     }
-    Write-Host '  1. Switch the platform landing zone tfvars to this scenario.' -ForegroundColor White
-    Write-Host '  2. Set regions, connectivity subscription, and any policy tweaks in lib/.' -ForegroundColor White
-    Write-Host '  3. Commit -> PR (01 CI plan) -> merge -> run 02 CD -> approve apply.' -ForegroundColor White
-    Write-Host ''
-    $fwText = switch ($scenario.firewall) {
-        'nva' { 'connectivity hub + NVA' }
-        'azure_firewall_basic' { 'connectivity hub + Azure Firewall Basic' }
-        default { 'connectivity hub + Azure Firewall' }
+    else {
+        $scenario = (Get-Content -Path (Join-Path $DataPath 'scenarios.json') -Raw | ConvertFrom-Json).scenarios |
+            Where-Object { $_.key -eq $a.scenario } | Select-Object -First 1
+        if ($scenario) {
+            Write-Host "  Deployed: $($scenario.name)" -ForegroundColor White
+            Write-Host "  connectivity_type = $($scenario.connectivityType)" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "  Deployed: $($a.scenario)" -ForegroundColor White
+        }
     }
-    Write-Host "  Gate: $fwText deployed; state in the chosen backend; OIDC auth." -ForegroundColor DarkCyan
+
     Write-Host ''
-    Write-Host '  Confirm current cost before proceeding:' -ForegroundColor Yellow
-    Write-Host '  https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/scenarios/' -ForegroundColor DarkCyan
+    Write-Host '  The pipeline is now your operating model. Every future platform change:' -ForegroundColor White
+    Write-Host '   1. Edit the platform config in the module repo.' -ForegroundColor Gray
+    Write-Host '   2. Open a pull request - the CI workflow runs the plan.' -ForegroundColor Gray
+    Write-Host '   3. Merge - the CD workflow plans, waits at the approval gate, then applies.' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  Customizing further' -ForegroundColor White
+    Write-Host '   - Management groups, archetypes, and policy assignments live in lib/ in the' -ForegroundColor Gray
+    Write-Host '     module repo. See samples/lib-pci for a worked regulatory-compliance example.' -ForegroundColor Gray
+    Write-Host '   - Changing topology later means replacing the platform config with another' -ForegroundColor Gray
+    Write-Host '     scenario, then letting the pipeline apply the difference.' -ForegroundColor Gray
+
+    if ($a.iacType -ne 'bicep' -and $scenario -and $scenario.estimatedMonthlyUsd -gt 0) {
+        Write-Host ''
+        Write-Host ('  This topology carries roughly ${0:N0}/month in fixed infrastructure cost.' -f $scenario.estimatedMonthlyUsd) -ForegroundColor Yellow
+        Write-Host '  https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/scenarios/' -ForegroundColor DarkCyan
+    }
 }
 
 function Show-ALZManualSteps {
     param([hashtable]$State, [string]$DataPath)
     $a = $State.answers
     $org = $a.githubOrg
-    $scenario = (Get-Content -Path (Join-Path $DataPath 'scenarios.json') -Raw | ConvertFrom-Json).scenarios |
-        Where-Object { $_.key -eq $a.scenario } | Select-Object -First 1
 
     Write-ALZBanner -Title 'Manual runbook - stage 2 onward' -Subtitle 'Do these yourself. Steps reflect the accelerator version you bootstrapped.'
 
@@ -255,14 +263,7 @@ function Show-ALZManualSteps {
     }
 
     Write-Host ''
-    if ($scenario.connectivityType -eq 'none') {
-        Write-ALZSection 'B. Target topology'
-        Write-Host '  Your target is management-only, so step A is the final deployment.' -ForegroundColor White
-        Write-Host '  To add connectivity later, switch the tfvars to a networking scenario and re-run 02 CD.' -ForegroundColor DarkGray
-    }
-    else {
-        Show-ALZRunSteps -State $State -DataPath $DataPath
-    }
+    Show-ALZRunSteps -State $State -DataPath $DataPath
 
     Write-ALZSection 'C. Day-2 operations'
     Write-Host '  - Change flow: edit the module repo tfvars/lib -> open a PR (01 CI runs plan) ->' -ForegroundColor White

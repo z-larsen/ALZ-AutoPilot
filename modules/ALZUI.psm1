@@ -26,9 +26,9 @@ $script:PhaseLabels = @{
     preflight = 'Prerequisites'
     config    = 'Generate config'
     bootstrap = 'Bootstrap'
-    proof     = 'Proof run'
-    hcp       = 'Move state to HCP'
-    run       = 'Deploy topology'
+    proof     = 'Deploy platform'
+    hcp       = 'HCP state migration'
+    run       = 'Next steps'
     complete  = 'Complete'
 }
 
@@ -86,12 +86,15 @@ function Write-ALZSplash {
     Write-Host '  The journey' -ForegroundColor White
     Write-Host '   1. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Plan       ' -ForegroundColor White -NoNewline; Write-Host 'a short interview; answers saved after every step' -ForegroundColor Gray
     Write-Host '   2. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Prereqs    ' -ForegroundColor White -NoNewline; Write-Host 'live checks: tooling, Azure Owner, providers, GitHub, HCP' -ForegroundColor Gray
-    Write-Host '   3. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Config     ' -ForegroundColor White -NoNewline; Write-Host 'generates inputs.yaml + tfvars (no hand-editing)' -ForegroundColor Gray
-    Write-Host '   4. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Bootstrap  ' -ForegroundColor White -NoNewline; Write-Host 'runs the accelerator and translates known errors' -ForegroundColor Gray
-    Write-Host '   5. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Deploy     ' -ForegroundColor White -NoNewline; Write-Host 'triggers + watches the pipeline, or prints a manual runbook' -ForegroundColor Gray
+    Write-Host '   3. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Confirm    ' -ForegroundColor White -NoNewline; Write-Host 'tenant, subscriptions, topology and cost before anything runs' -ForegroundColor Gray
+    Write-Host '   4. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Config     ' -ForegroundColor White -NoNewline; Write-Host 'built from the official config for your chosen topology' -ForegroundColor Gray
+    Write-Host '   5. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Bootstrap  ' -ForegroundColor White -NoNewline; Write-Host 'runs the accelerator and translates known errors' -ForegroundColor Gray
+    Write-Host '   6. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Deploy     ' -ForegroundColor White -NoNewline; Write-Host 'triggers + watches the pipeline, or prints a manual runbook' -ForegroundColor Gray
     Write-Host ''
     Write-Host '  Good to know' -ForegroundColor White
-    Write-Host '   - Safe: your GitHub token is entered masked and never written to disk' -ForegroundColor Gray
+    Write-Host '   - Terraform (11 scenarios) or Bicep (3 network types), on GitHub' -ForegroundColor Gray
+    Write-Host '   - State in Azure Storage, or HCP Terraform with the migration verified' -ForegroundColor Gray
+    Write-Host '   - Safe: tokens are entered masked and never written to disk' -ForegroundColor Gray
     Write-Host '   - Resumable: re-run with the same delivery folder to pick up where you left off' -ForegroundColor Gray
     Write-Host '   - Requires PowerShell 7.4+ and an Azure CLI sign-in (az login)' -ForegroundColor Gray
     Write-Host ''

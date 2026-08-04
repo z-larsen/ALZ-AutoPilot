@@ -3,15 +3,17 @@
 # INTERVIEW AND CONFIG-FILE GENERATION
 ###########################################################################
 # Purpose: Ask only the decisions that matter, validate them inline, and
-#          generate inputs.yaml and the proof-run tfvars so the operator
-#          never hand-edits scattered files or hits template-token traps.
+#          generate inputs.yaml plus the platform config for the chosen
+#          topology so the operator never hand-edits scattered files or hits
+#          template-token traps.
 # Author: Zac Larsen
 # Date: Created for the ALZ Accelerator orchestrator app
 #
 # Description:
 # 1. Invoke-ALZInterview collects and validates every answer.
 # 2. Write-ALZInputsYaml renders the accelerator inputs.yaml.
-# 3. Write-ALZManagementTfvars renders the management-only proof tfvars.
+# 3. Write-ALZStarterTfvars copies the official config for the chosen
+#    Terraform scenario; Write-ALZBicepConfig does the same for Bicep.
 # The GitHub PAT is never collected here or written to disk - it is read
 # masked at bootstrap time and set only as a session env var.
 #
