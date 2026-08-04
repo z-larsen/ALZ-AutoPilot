@@ -5,7 +5,9 @@
 
 # ALZ Autopilot
 
-A guided orchestration layer for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/) that reduces process overhead without removing the accelerator's review, approval, and deployment boundaries: one entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
+Guided automation for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). It does not change what the accelerator does. It's a guided orchestration layer that reduces process overhead without removing the accelerator's review, approval, and deployment boundaries.
+
+One entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
 
 ## The journey
 
