@@ -17,8 +17,6 @@
 
 Guided automation for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). It does not change what the accelerator does - it fixes how the process is *presented*: one entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
 
-Built after a live delivery where the pain was never ALZ itself - it was the scattered tooling (PowerShell wizard + GitHub UI + HCP UI + YAML + tfvars + docs across many pages) and opaque errors that only surfaced mid-apply. Suitable for both internal rehearsals and customer-facing engagements.
-
 ## The journey
 
 | Phase | What happens |
