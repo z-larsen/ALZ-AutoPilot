@@ -32,6 +32,22 @@ Guided automation for the official [Azure Landing Zones IaC Accelerator](https:/
 
 The platform config is generated from the **official** scenario file for your choice, then it is yours to edit. Re-runs patch only the values the interview owns (regions, security contact, subscription placement) so hand edits survive.
 
+## Safety gates
+
+"One command" means one entry point, not unattended deployment. Every gate the accelerator builds in is preserved, and the tool adds one of its own. Nothing reaches Azure without a human saying yes.
+
+| Gate | When | Default |
+|---|---|---|
+| **Confirm target state** | After the interview, before anything runs. Shows tenant, subscriptions by name, topology, regions, runners, and estimated cost | Prompts |
+| **Review configuration** | After config generation, before bootstrap. Offers to open the file, because after bootstrap it lives in the repo and changes go through a pull request | **Stops unless you confirm** |
+| **Run the bootstrap** | Before any Azure resource or repo is created | Prompts |
+| **Trigger the pipeline** | Manual dispatch of the CD workflow. Runs `terraform plan` first | Prompts |
+| **Apply approval** | The accelerator's own GitHub environment gate, created from your `apply_approvers` | **Enforced by GitHub** |
+
+On the apply gate specifically: this tool **cannot** bypass it. The gate is a GitHub deployment environment, enforced server-side. The tool detects the pending approval and waits. It will only submit an approval on your behalf if you explicitly opt in at a prompt that **defaults to No**, and that call fails unless you are a named reviewer. Approving in the browser is the normal path, and the tool keeps watching while you do it.
+
+The accelerator's documented requirement to review the platform configuration before deploying is respected. The tool fills in the values that are usually hand-edited (regions, security contact, subscription placement) so the classic placeholder mistakes cannot happen, and then still stops and asks you to review the file before the bootstrap.
+
 ## What it fixes
 
 | Pain in the raw accelerator | What this adds |

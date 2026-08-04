@@ -155,6 +155,24 @@ The apply job waits for a human. Approving from the CLI usually fails, because a
 
 If you close the window, re-run the app and choose stage 2 option 1 to reattach to the run in progress.
 
+**This tool cannot bypass that gate.** It is a GitHub deployment environment enforced server-side. The tool only submits an approval if you explicitly opt in at a prompt that defaults to No, and that call fails unless you are a named reviewer.
+
+---
+
+## Where it stops and asks
+
+One entry point does not mean unattended deployment. The run halts at each of these:
+
+| Gate | What you are confirming |
+|---|---|
+| Confirm target state | Tenant, subscriptions by name, topology, regions, runners, estimated cost |
+| Review configuration | The generated platform config, before the bootstrap pushes it into the repo. **Stops unless you confirm** |
+| Run the bootstrap | Before any Azure resource or repository is created |
+| Trigger the pipeline | Starts `terraform plan`; the apply is still gated |
+| Apply approval | Enforced by GitHub, not by this tool |
+
+The accelerator requires a human to review the platform configuration before deploying. The tool fills in the values normally hand-edited, so placeholder mistakes cannot happen, and still stops for your review before bootstrapping.
+
 ---
 
 ## Stopping, resuming, and re-running

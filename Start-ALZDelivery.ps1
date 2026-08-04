@@ -273,6 +273,32 @@ else {
 }
 Set-ALZPhaseStatus -State $state -Phase 'config' -Status 'done'
 
+# ---- Gate: review the generated config ---------------------------------
+# The accelerator docs require a human to review the platform config before the
+# bootstrap. Generation fills the values that are normally hand-edited, but the
+# bootstrap pushes this file into the module repo, after which changes go through
+# a pull request - so this is the last cheap moment to change anything.
+$platformConfigPath = if ($state.answers.iacType -eq 'bicep') { $bicepPath } else { $tfvarsPath }
+Write-ALZSection 'Review the configuration before it is deployed'
+Write-Host '  These two files define your platform landing zone:' -ForegroundColor White
+Write-Host "   1. $inputsPath" -ForegroundColor Gray
+Write-Host "   2. $platformConfigPath" -ForegroundColor Gray
+Write-Host ''
+Write-Host '  Regions, security contact, and subscription placement are already filled in from' -ForegroundColor DarkGray
+Write-Host '  your answers. Review anything else your organization cares about now: IP address' -ForegroundColor DarkGray
+Write-Host '  ranges, resource naming, DDoS protection, and policy settings.' -ForegroundColor DarkGray
+Write-Host ''
+Write-Host '  After the bootstrap this file lives in the module repo, and further changes go' -ForegroundColor Yellow
+Write-Host '  through a pull request and the approval gate.' -ForegroundColor Yellow
+if (Read-ALZConfirm -Prompt 'Open the platform config for review now?' -Default $false) {
+    try { code $platformConfigPath 2>$null } catch { }
+    Write-ALZStatus -Status INFO -Message 'Opened in your editor. Save any changes before continuing.'
+}
+if (-not (Read-ALZConfirm -Prompt 'Configuration reviewed and ready to bootstrap?' -Default $false)) {
+    Write-ALZStatus -Status INFO -Message 'Stopping so you can review or edit the configuration.' -Detail 'Re-run with the same delivery folder to continue; your edits are preserved.'
+    return
+}
+
 # ---- Phase: Bootstrap --------------------------------------------------
 Write-ALZProgress -CurrentPhase 'bootstrap' -SkipPhases $skip
 $runBootstrap = $true
@@ -398,7 +424,7 @@ try {
             Write-ALZStatus -Status INFO -Message "A run is already in progress (#$($existing.run_number)) - watching it." -Detail $existing.html_url
             $watch = $true
         }
-        elseif (Read-ALZConfirm -Prompt "Trigger '$($repo.CdName)' now?" -Default $true) {
+        elseif (Read-ALZConfirm -Prompt "Trigger '$($repo.CdName)' now? (plan runs first; apply still needs approval)" -Default $true) {
             if (Start-ALZWorkflow -Token $tok -Org $state.answers.githubOrg -Repo $repo.Repo -WorkflowId $repo.CdId -Ref $repo.DefaultBranch) {
                 Write-ALZStatus -Status OK -Message 'Workflow triggered.'
                 $watch = $true
@@ -415,6 +441,7 @@ try {
             $result = Wait-ALZPipelineRun -Token $tok -Org $state.answers.githubOrg -Repo $repo.Repo -WorkflowId $repo.CdId
             if ($result.State -eq 'waiting_approval') {
                 Write-ALZStatus -Status WARN -Message 'Apply gate reached - your approval is required.' -Detail $result.Url
+                Write-Host '  Nothing reaches Azure until a named approver approves this run.' -ForegroundColor DarkGray
                 $approved = $false
                 if (Read-ALZConfirm -Prompt 'Approve the apply from here (needs your reviewer rights)?' -Default $false) {
                     try {
