@@ -1,0 +1,21 @@
+{
+  "type": "Microsoft.Authorization/policyAssignments",
+  "apiVersion": "2024-04-01",
+  "name": "Assign-PCI-DSS-v4",
+  "dependsOn": [],
+  "properties": {
+    "displayName": "PCI DSS v4 regulatory compliance",
+    "description": "Assigns the built-in PCI DSS v4 regulatory compliance initiative. Audit-only: it reports compliance in the Microsoft Defender for Cloud regulatory compliance dashboard and does not block deployments.",
+    "policyDefinitionId": "/providers/Microsoft.Authorization/policySetDefinitions/c676748e-3af9-4e22-bc28-50feed564afb",
+    "enforcementMode": "Default",
+    "nonComplianceMessages": [
+      {
+        "message": "This resource does not meet a PCI DSS v4 control. Review the Defender for Cloud regulatory compliance dashboard for details."
+      }
+    ],
+    "parameters": {},
+    "scope": "/providers/Microsoft.Management/managementGroups/placeholder",
+    "notScopes": []
+  },
+  "location": "${default_location}"
+}

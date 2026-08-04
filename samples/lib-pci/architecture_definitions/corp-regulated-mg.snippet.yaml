@@ -1,0 +1,15 @@
+# NOT a library asset. The filename deliberately omits ".alz_architecture_definition"
+# so the ALZ provider will not load it. Copy the block below into the real
+# alz_custom.alz_architecture_definition.yaml that the accelerator places in config/lib.
+#
+# Add this entry to the existing management_groups list. Do not replace the file:
+# the architecture definition must describe the WHOLE hierarchy, so removing the
+# other entries would delete those management groups.
+
+- id: corp-regulated
+  display_name: Corp Regulated
+  archetypes:
+    - corp                # keep the standard corp policies
+    - corp_regulated      # plus the PCI DSS and HITRUST/HIPAA assignments
+  exists: false
+  parent_id: landingzones

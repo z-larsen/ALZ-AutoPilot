@@ -1,0 +1,149 @@
+{
+  "note": "Known ALZ Accelerator failure signatures mapped to plain-language remediation. The orchestrator matches captured error text against 'pattern' (regex, case-insensitive) and shows the fix. Entries with a 'docUrl' restate guidance from the official Azure Landing Zones documentation; entries with an empty 'docUrl' are failures observed in live deliveries that the official troubleshooting page does not yet cover.",
+  "traps": [
+    {
+      "id": "rp-registration-timeout",
+      "pattern": "context deadline exceeded|Provider Name.*to be registered|Encountered an error whilst ensuring Resource Providers",
+      "phase": "bootstrap",
+      "title": "Resource provider auto-registration hung or timed out",
+      "remediation": "Terraform's azurerm provider tried to auto-register a provider (often Microsoft.DataMigration, which can take 15+ minutes) and timed out. The orchestrator now sets ARM_RESOURCE_PROVIDER_REGISTRATIONS=none so Terraform skips this; ensure the ALZ providers are pre-registered (preflight does this) and re-run.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/faq/resource-providers/"
+    },
+    {
+      "id": "github-personal-account",
+      "pattern": "personal account|not.*organization|organization.*required",
+      "phase": "bootstrap",
+      "title": "GitHub personal account used instead of an organization",
+      "remediation": "The accelerator requires a GitHub organization. Create a free org at https://github.com/organizations/plan and set github_organization_name to it.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/"
+    },
+    {
+      "id": "fileset-inconsistent-onedrive",
+      "pattern": "fileset.*inconsistent result|function returned an inconsistent result|starter_module_folder_path",
+      "phase": "bootstrap",
+      "title": "Terraform fileset() inconsistent - delivery folder is on a cloud-synced path",
+      "remediation": "The accelerator enumerates the starter module with fileset(); on a cloud-synced folder (OneDrive/Dropbox) that returns inconsistent results between plan and apply, so the module and workflows fail to push (empty repos). Move the delivery folder to a plain local path like C:\\ALZ\\<name> and re-run.",
+      "docUrl": ""
+    },
+    {
+      "id": "repo-workflows-not-pushed",
+      "pattern": "refusing to allow.*workflow|without .workflow. scope|workflows permission|not accessible.*workflow",
+      "phase": "bootstrap",
+      "title": "Module push rejected - PAT missing Workflows permission",
+      "remediation": "GitHub atomically rejects any git push that adds .github/workflows files if the PAT lacks the Workflows permission, so the whole module/workflow push fails and the repos are left nearly empty. Add Repository > Workflows: Read and write to the fine-grained PAT and re-run the bootstrap.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/"
+    },
+    {
+      "id": "partial-module-download",
+      "pattern": "config file does not exist.*ALZ-Powershell\\.config\\.json",
+      "phase": "bootstrap",
+      "title": "Partial module download - version marker present but module missing",
+      "remediation": "The .alz-version-data.json marker in the delivery folder claims the bootstrap module is already downloaded, so the accelerator skipped re-extracting it - but the bootstrap\\<version>\\.config\\ALZ-Powershell.config.json file is gone (bootstrap folder deleted, or a prior run was interrupted). Delete .alz-version-data.json plus the bootstrap\\ and starter\\ folders in the delivery path, then re-run so both modules download fresh. The orchestrator now heals this automatically before each bootstrap.",
+      "docUrl": ""
+    },
+    {
+      "id": "state-storage-firewall-403",
+      "pattern": "Failed to get existing workspaces.*(AuthorizationFailure|not authorized to perform this operation)|listing blobs.*403",
+      "phase": "run",
+      "title": "Pipeline can't reach the Terraform state storage (403 AuthorizationFailure)",
+      "remediation": "The state storage account has public network access disabled - common when the landing tenant enforces a 'no public storage' policy - so a GitHub-hosted runner on the public internet cannot reach it. The recommended fix is to re-bootstrap with private networking + self-hosted runners: answer yes to the 'private networking + self-hosted runners' interview question (sets use_private_networking: true and use_self_hosted_runners: true), supply the second Runner Registration PAT, and re-run. The accelerator then deploys a VNet + private endpoint + container-based runners that reach the state storage privately. Quick alternative for a throwaway lab only: re-enable public network access on the state storage account.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/advancedscenarios/"
+    },
+    {
+      "id": "oidc-subject-no-match-700213",
+      "pattern": "AADSTS700213|No matching federated identity record found",
+      "phase": "run",
+      "title": "OIDC federated-credential subject mismatch (AADSTS700213)",
+      "remediation": "Azure AD rejected the pipeline's OIDC token because no federated credential subject matches what GitHub presented. This happens under a GitHub Enterprise that customizes the OIDC subject (for example injecting immutable org/repo IDs like org@123/repo@456), which the bootstrap-created credentials do not match. Compare the presented subject in the run log against the credential subjects (az identity federated-credential list), then update each credential's --subject to exactly match the presented one. Specific to enterprises that enforce a custom OIDC subject template; re-running bootstrap reverts the credentials, so re-apply after any re-bootstrap.",
+      "docUrl": "https://learn.microsoft.com/entra/workload-id/workload-identity-federation"
+    },
+    {
+      "id": "public-ip-feature-not-registered",
+      "pattern": "SubscriptionNotRegisteredForFeature.*AllowBringYourOwnPublicIpAddress|not registered for feature Microsoft\\.Network",
+      "phase": "bootstrap",
+      "title": "Public IP blocked - subscription not registered for a Microsoft.Network feature",
+      "remediation": "The self-hosted-runner networking creates a public IP for NAT egress (so the in-VNet runners reach GitHub), but the subscription is not registered for the required Microsoft.Network feature - common in governed/managed lab subscriptions. Register it and re-run: az feature register --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress ; wait until az feature show --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress --query properties.state returns Registered (can take several minutes) ; az provider register --namespace Microsoft.Network ; then re-run the bootstrap.",
+      "docUrl": "https://learn.microsoft.com/azure/azure-resource-manager/management/preview-features"
+    },
+    {
+      "id": "branch-protection-blocks-rebootstrap",
+      "pattern": "Could not update file: Changes must be made through a pull request|409.*must be made through a pull request",
+      "phase": "bootstrap",
+      "title": "Re-bootstrap blocked by branch protection (409 - pull request required)",
+      "remediation": "You changed bootstrap config (for example enabling private networking) and re-ran against repos that already have the accelerator's branch policy, so Terraform cannot update ci-template.yaml / cd-template.yaml / platform-landing-zone.auto.tfvars directly on main. Cleanest fix: do a FRESH bootstrap with the desired config from the start, so those files are written before branch protection exists. Alternative: temporarily remove the 'require a pull request before merging' rule on the module and templates repos, re-run, then restore it.",
+      "docUrl": ""
+    },
+    {
+      "id": "blank-subscription-placement",
+      "pattern": "All subscription ids must be valid UUIDs|Each subscription ID can only be specified once|Invalid value for variable.*subscription_placement",
+      "phase": "run",
+      "title": "Invalid subscription_placement - a blank or repeated subscription ID",
+      "remediation": "Two causes. (1) Blank: a subscription left empty (usually identity or security) is still written into subscription_ids, and a blank is neither a valid UUID nor unique, so two blanks also read as a duplicate. (2) Repeated: the same subscription assigned to more than one platform role, which the deployment rejects. Fix both by listing only real subscriptions, each exactly once, in the delivery config/inputs.yaml and in terraform.tfvars.json in the module repo. Management and Connectivity are required; Identity and Security are recommended but may be omitted (the documented SMB pattern uses only the two required ones). The orchestrator now omits blank subscriptions and blocks duplicates during the interview.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/platform-subscriptions/"
+    },
+    {
+      "id": "github-sso-unauthorized",
+      "pattern": "SAML|SSO|single sign-on|must be authorized|Resource protected by organization",
+      "phase": "preflight",
+      "title": "GitHub PAT not authorized for the organization's SSO",
+      "remediation": "The org enforces SAML SSO and the token is not authorized for it. On github.com/settings/tokens, authorize the token for the org, or use a dedicated free org without SSO for rehearsals.",
+      "docUrl": "https://docs.github.com/authentication/authenticating-with-saml-single-sign-on"
+    },
+    {
+      "id": "github-token-bad-scope",
+      "pattern": "Bad credentials|Requires authentication|Resource not accessible by (personal access token|integration)|Must have admin rights to Repository",
+      "phase": "preflight",
+      "title": "GitHub PAT invalid or missing required permissions",
+      "remediation": "Regenerate a fine-grained PAT with Resource owner = your org, All repositories, Read/write on Actions, Administration, Contents, Environments, Secrets, Variables, Workflows, AND Organization > Members: Read and write. The 'Resource not accessible' error at apply is almost always the missing Members permission.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/"
+    },
+    {
+      "id": "hcp-remote-mode",
+      "pattern": "execution.mode.*remote|remote execution|plan.*not.*saved|saved plan",
+      "phase": "hcp",
+      "title": "HCP workspace is in Remote execution mode",
+      "remediation": "The workspace must be Execution Mode = Local so the GitHub runner executes Terraform and the saved plan/apply handoff works. Change it in HCP: Workspace > Settings > General > Execution Mode = Local.",
+      "docUrl": "https://developer.hashicorp.com/terraform/cloud-docs/workspaces/settings#execution-mode"
+    },
+    {
+      "id": "hcp-backend-config-conflict",
+      "pattern": "backend.*cloud.*cannot|cloud.*block.*backend|Both a backend|-backend-config",
+      "phase": "hcp",
+      "title": "Leftover -backend-config flag after adding the cloud block",
+      "remediation": "A cloud block and azurerm backend-config cannot coexist. Remove every -backend-config flag from terraform init in the CD plan, CD apply, and CI plan steps. Leave CI validate's -backend=false alone.",
+      "docUrl": "https://developer.hashicorp.com/terraform/cli/cloud/settings"
+    },
+    {
+      "id": "hcp-token-missing",
+      "pattern": "TF_TOKEN|required token could not be found|terraform.io.*credentials|401.*app.terraform.io",
+      "phase": "hcp",
+      "title": "HCP token not reaching the workflow",
+      "remediation": "Add the TF_TOKEN_app_terraform_io secret, declare it under the reusable workflow's secrets:, add it to the job env:, and add 'secrets: inherit' to the caller 01/02 workflows.",
+      "docUrl": "https://developer.hashicorp.com/terraform/cloud-docs/run/cli"
+    },
+    {
+      "id": "region-not-set",
+      "pattern": "starter_locations|location.*required|no location|region.*not set",
+      "phase": "config",
+      "title": "Region not set in tfvars",
+      "remediation": "Set the real region only in starter_locations = [\"<region>\"]. Leave every ${starter_location_01} template token untouched.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/"
+    },
+    {
+      "id": "owner-missing",
+      "pattern": "AuthorizationFailed|does not have authorization|RoleAssignment.*denied|insufficient privileges",
+      "phase": "bootstrap",
+      "title": "Missing Owner on a management group or subscription",
+      "remediation": "The deploying account needs Owner on the parent management group and Owner on each platform subscription. (Terraform does not need root / User Access Administrator; that is Bicep-only.)",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/platform-subscriptions/"
+    },
+    {
+      "id": "onedrive-file-lock",
+      "pattern": "being used by another process|directory is not empty|Access to the path.*denied",
+      "phase": "any",
+      "title": "File lock (often OneDrive sync) during module or temp cleanup",
+      "remediation": "Pause OneDrive syncing, or move the working folder off OneDrive. These cleanup errors are usually cosmetic; verify the module/output actually landed before assuming failure.",
+      "docUrl": ""
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+# Delivery artifacts: never commit customer config, state, or logs.
+# These are produced in the -DeliveryPath folder, but guard against a delivery
+# folder ever being created inside the app directory.
+.alz-delivery-state.json
+.alz-version-data.json
+bootstrap/
+starter/
+output/
+temp/
+config/
+.tools/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+
+# Generated config that can contain subscription IDs, org names, or emails
+inputs.yaml
+platform-landing-zone.tfvars
+*.auto.tfvars
+
+# Logs and transcripts (may contain tokens before scrubbing)
+*.log
+alz-bootstrap-*.log
+
+# Secrets
+.env
+*.key
+*.pem

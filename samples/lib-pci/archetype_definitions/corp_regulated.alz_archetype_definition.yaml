@@ -1,0 +1,7 @@
+name: "corp_regulated"
+policy_assignments:
+  - "Assign-PCI-DSS-v4"
+  - "Assign-HITRUST-HIPAA"
+policy_definitions: []
+policy_set_definitions: []
+role_definitions: []

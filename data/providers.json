@@ -1,0 +1,26 @@
+{
+  "source": "https://azure.github.io/Azure-Landing-Zones/faq/resource-providers/",
+  "note": "ALZ-recommended providers to pre-register. The orchestrator sets ARM_RESOURCE_PROVIDER_REGISTRATIONS=none during bootstrap so Terraform does not auto-register (and hang on) providers the deployment does not use, e.g. Microsoft.DataMigration.",
+  "required": [
+    "Microsoft.Insights",
+    "Microsoft.AlertsManagement",
+    "Microsoft.OperationalInsights",
+    "Microsoft.OperationsManagement",
+    "Microsoft.Automation",
+    "Microsoft.Security",
+    "Microsoft.Network",
+    "Microsoft.EventGrid",
+    "Microsoft.ManagedIdentity",
+    "Microsoft.GuestConfiguration",
+    "Microsoft.Advisor",
+    "Microsoft.PolicyInsights",
+    "Microsoft.ContainerInstance",
+    "Microsoft.Storage"
+  ],
+  "recommended": [
+    "Microsoft.Compute",
+    "Microsoft.ResourceHealth",
+    "Microsoft.KeyVault",
+    "Microsoft.Capacity"
+  ]
+}

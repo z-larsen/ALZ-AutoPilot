@@ -1,0 +1,65 @@
+## Decision 5: Platform Landing Zone Azure Regions
+starter_locations: ["<region-1>", "<region-2>"]
+
+# Management Groups
+
+# The naming pattern is <id-prefix><id><id-postfix> and <name-prefix><name><name-postfix>
+# You can use the prefix and postfix variables to add a consistent naming convention across all management groups
+# For custom management group structures, you can modify the Bicep code directly after running the bootstrap and prior to deploying the Platform Landing Zone
+
+management_group_id_prefix: ""
+management_group_id_postfix: ""
+management_group_name_prefix: ""
+management_group_name_postfix: ""
+
+management_group_int_root_id: "alz"
+management_group_int_root_name: "Azure Landing Zones"
+
+management_group_platform_id: "platform"
+management_group_platform_name: "Platform"
+
+management_group_connectivity_id: "connectivity"
+management_group_connectivity_name: "Connectivity"
+
+management_group_identity_id: "identity"
+management_group_identity_name: "Identity"
+
+management_group_security_id: "security"
+management_group_security_name: "Security"
+
+management_group_landing_zones_id: "landingzones"
+management_group_landing_zones_name: "Landing Zones"
+
+management_group_corp_id: "corp"
+management_group_corp_name: "Corp"
+
+management_group_online_id: "online"
+management_group_online_name: "Online"
+
+management_group_local_id: "local"
+management_group_local_name: "Local"
+
+management_group_decommissioned_id: "decommissioned"
+management_group_decommissioned_name: "Decommissioned"
+
+management_group_sandbox_id: "sandbox"
+management_group_sandbox_name: "Sandbox"
+
+# Resource Groups
+
+# These prefixes are used to name the resource groups created in the Platform Landing Zone
+# The naming pattern is <resource_group_name_prefix>-<location>
+
+resource_group_logging_name_prefix: "rg-alz-logging"
+resource_group_hub_networking_name_prefix: "rg-alz-conn"
+resource_group_virtual_wan_name_prefix: "rg-alz-conn"
+resource_group_dns_name_prefix: "rg-alz-dns"
+resource_group_private_dns_resolver_name_prefix: "rg-alz-dnspr"
+
+# Networking
+
+# Choose the network architecture for the Platform Landing Zone
+# Valid options are "hubNetworking", "vwanConnectivity", or "none"
+
+network_type: "hubNetworking"
+

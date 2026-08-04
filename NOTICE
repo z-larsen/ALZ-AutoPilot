@@ -1,0 +1,56 @@
+ALZ Autopilot
+Copyright (c) 2026 Zac Larsen
+Licensed under the MIT License. See LICENSE.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY CONTENT
+--------------------------------------------------------------------------------
+
+This project redistributes unmodified configuration files from the following
+Microsoft open source projects. Each is licensed under the MIT License, and the
+copyright and permission notice below is reproduced as that license requires.
+
+1. Azure Landing Zones Terraform Accelerator
+   https://github.com/Azure/alz-terraform-accelerator
+   Files: data/scenarios/*.tfvars
+   Source: templates/platform_landing_zone/examples/
+
+2. Azure Landing Zones Bicep Accelerator
+   https://github.com/Azure/alz-bicep-accelerator
+   Files: data/scenarios-bicep/platform-landing-zone.yaml
+   Source: examples/platform-landing-zone.yaml
+
+These files are bundled so a delivery works offline and against a known-good
+version. They are not authored by this project. For the current upstream
+versions, always refer to the repositories above.
+
+--------------------------------------------------------------------------------
+MIT License (applies to the third-party content listed above)
+
+Copyright (c) Microsoft Corporation.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+NOT AFFILIATED WITH MICROSOFT
+--------------------------------------------------------------------------------
+
+This is a personal project. It is not produced, endorsed, or supported by
+Microsoft. "Azure" and related names are trademarks of Microsoft Corporation and
+are used here only to describe what this tool works with.
