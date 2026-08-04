@@ -62,6 +62,29 @@ The accelerator's documented requirement to review the platform configuration be
 | Manual pipeline click-through + guessing the approval gate | Discovers the repo, triggers + watches the run, detects the apply gate, verifies MGs + policies |
 | "Have you done the HCP migration?" answered on trust | Eight live checks against the repos: cloud block, no leftover azurerm backend, `TF_TOKEN_app_terraform_io` secret, no `-backend-config` flags, secret wiring, `secrets: inherit` |
 
+## How it compares
+
+There are already two ways to get a friendlier front end on the accelerator. Both are good at what they do, and neither one covers the same ground, so here is the honest split.
+
+**The accelerator's own interactive mode.** Running `Deploy-Accelerator` with no parameters starts a built-in wizard that collects your answers and writes `inputs.yaml`, then runs the bootstrap. It stops short of the platform configuration: the documented flow has you go and hand-edit the starter config (`starter_locations`, `defender_email_security_contact`, subscription placement) before continuing, and it hands the pipeline back to you once the repos exist.
+
+**[soaand01/alzWizard](https://github.com/soaand01/alzWizard).** A Flask and Bootstrap web UI that walks the phases with per-card confirmation gating, and lets you preview and download starter inputs and platform landing zone `.tfvars` scenarios. Its README describes it as "a helper and reference UI" that "complements the ALZ Accelerator documentation and starter repositories; it does not replace them." It is a browsing and reference experience, not something that runs against your tenant.
+
+| | Interactive mode | alzWizard | ALZ Autopilot |
+|---|---|---|---|
+| Form factor | PowerShell prompts | Web UI | PowerShell CLI |
+| Collects your answers | Yes | Yes | Yes |
+| Writes `inputs.yaml` | Yes | Download | Yes |
+| Platform config for the chosen scenario | Hand-edited | Download | Generated, values filled |
+| Checks Azure role, RPs, PAT scopes, HCP before bootstrap | Inputs and tooling | No | Yes |
+| Runs the bootstrap | Yes | No, guides you | Yes |
+| Plain-language fixes for known failures | No | No | Yes |
+| Verifies repos actually received the workflows | No | No | Yes |
+| Triggers, watches, and verifies the CD pipeline | No | No | Yes |
+| Resumes after an interrupted run | No | No | Yes |
+
+So "in one command" buys you the last mile: the environment problems are caught before the bootstrap instead of surfacing as a Terraform stack trace partway through, the platform config arrives already populated, and the run continues through the pipeline to verified management groups and policies rather than ending when the repos appear. Everything it does is the accelerator doing it. The gates in the section above are all still there.
+
 ## GitHub plan note
 
 The accelerator ties its approval gate and Azure-auth config to GitHub **environments**, which on a **free org only work on public repos** - so a free org gets **public** repos (fine for a rehearsal; nothing sensitive is exposed). A **Team/Enterprise/EMU** org gets **private** repos with the gate intact. The app works with both and warns you in preflight when the org is free.
