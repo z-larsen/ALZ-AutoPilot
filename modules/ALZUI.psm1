@@ -92,7 +92,7 @@ function Write-ALZSplash {
     Write-Host '   6. ' -ForegroundColor DarkCyan -NoNewline; Write-Host 'Deploy     ' -ForegroundColor White -NoNewline; Write-Host 'triggers + watches the pipeline, or prints a manual runbook' -ForegroundColor Gray
     Write-Host ''
     Write-Host '  Good to know' -ForegroundColor White
-    Write-Host '   - Terraform (11 scenarios) or Bicep (3 network types), on GitHub' -ForegroundColor Gray
+    Write-Host '   - Terraform (11 scenarios) or Bicep (3 network types), on GitHub or Azure DevOps' -ForegroundColor Gray
     Write-Host '   - State in Azure Storage, or HCP Terraform with the migration verified' -ForegroundColor Gray
     Write-Host '   - Safe: tokens are entered masked and never written to disk' -ForegroundColor Gray
     Write-Host '   - Resumable: re-run with the same delivery folder to pick up where you left off' -ForegroundColor Gray
@@ -208,7 +208,7 @@ function Write-ALZTargetState {
     & $head 'Delivery choices'
     & $row 'Delivery name' $Answers.deliveryName
     & $row 'IaC language' $(if ($Answers.iacType -eq 'bicep') { 'Bicep' } else { 'Terraform' })
-    & $row 'Version control' "GitHub org '$($Answers.githubOrg)'"
+    & $row 'Version control' $(if ($Answers.vcs -eq 'azuredevops') { "Azure DevOps '$($Answers.adoOrg)/$($Answers.adoProject)'" } else { "GitHub org '$($Answers.githubOrg)'" })
     if ($Answers.iacType -eq 'bicep') {
         & $row 'Topology' "network_type: $($Answers.bicepNetworkType)"
     }
@@ -221,7 +221,7 @@ function Write-ALZTargetState {
     }
     & $row 'Region(s)' $(if ($Answers.regionSecondary) { "$($Answers.region), $($Answers.regionSecondary)" } else { $Answers.region })
     & $row 'State backend' $(if ($Answers.stateBackend -eq 'hcp') { "HCP Terraform ($($Answers.hcpOrg)/$($Answers.hcpWorkspace), Local mode)" } else { 'Azure Storage (created by bootstrap)' })
-    & $row 'Runners' $(if ($Answers.selfHostedRunners) { 'Self-hosted in a VNet (private networking)' } else { 'GitHub-hosted' })
+    & $row 'Runners' $(if ($Answers.selfHostedRunners) { 'Self-hosted in a VNet (private networking)' } elseif ($Answers.vcs -eq 'azuredevops') { 'Microsoft-hosted agents' } else { 'GitHub-hosted' })
     & $row 'Apply approvers' ($Answers.applyApprovers -join ', ')
     if ($Scenario -and $null -ne $Scenario.estimatedMonthlyUsd) {
         $cost = if ($Scenario.estimatedMonthlyUsd -eq 0) { 'no fixed infrastructure cost' } else { ('~${0:N0} / month' -f $Scenario.estimatedMonthlyUsd) }
@@ -336,11 +336,11 @@ function Write-ALZSummary {
     if ($a.regionSecondary) { & $row 'Secondary region' $a.regionSecondary }
     & $row 'IaC language' $a.iacType
     & $row 'Scenario' $(if ($a.iacType -eq 'bicep') { "network_type: $($a.bicepNetworkType)" } else { $a.scenario })
-    & $row 'GitHub org' $a.githubOrg
+    if ($a.vcs -eq 'azuredevops') { & $row 'Azure DevOps' "$($a.adoOrg)/$($a.adoProject)" } else { & $row 'GitHub org' $a.githubOrg }
     $subCount = @($a.subscriptions.Values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
     & $row 'Platform subscriptions' $subCount
     & $row 'State backend' $(if ($a.stateBackend -eq 'hcp') { 'HCP Terraform' } else { 'Azure Storage' })
-    & $row 'Runners' $(if ($a.selfHostedRunners) { 'Self-hosted (private networking)' } else { 'GitHub-hosted' })
+    & $row 'Runners' $(if ($a.selfHostedRunners) { 'Self-hosted (private networking)' } elseif ($a.vcs -eq 'azuredevops') { 'Microsoft-hosted agents' } else { 'GitHub-hosted' })
 
     & $head 'Deployed this delivery'
     if ($Repo) {

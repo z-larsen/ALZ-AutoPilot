@@ -58,9 +58,14 @@ function Invoke-ALZBootstrap {
     param(
         [hashtable]$State,
         [string]$DataPath,
-        [securestring]$GitHubToken,
-        [securestring]$GitHubRunnersToken
+        [securestring]$VcsToken,
+        [securestring]$VcsAgentsToken
     )
+    # The two bootstrap modules read their credentials from differently named TF_VAR_
+    # environment variables. Everything else about the run is identical.
+    $isAdo = ($State.answers.vcs -eq 'azuredevops')
+    $tokenVar = if ($isAdo) { 'TF_VAR_azure_devops_personal_access_token' } else { 'TF_VAR_github_personal_access_token' }
+    $agentsVar = if ($isAdo) { 'TF_VAR_azure_devops_agents_personal_access_token' } else { 'TF_VAR_github_runners_personal_access_token' }
     $inputsPath = Join-Path $State.deliveryPath 'config\inputs.yaml'
     $platformConfig = if ($State.answers.iacType -eq 'bicep') {
         Join-Path $State.deliveryPath 'config\platform-landing-zone.yaml'
@@ -101,19 +106,19 @@ function Invoke-ALZBootstrap {
     # Supply the PAT only as a session env var - never persisted.
     # Copy from the SecureString and free the unmanaged BSTR immediately so the
     # plaintext does not linger in unmanaged memory.
-    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($GitHubToken)
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($VcsToken)
     $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    $env:TF_VAR_github_personal_access_token = $plain
+    Set-Item -Path "Env:$tokenVar" -Value $plain
 
-    # Self-hosted runners need a second PAT (token-2) to register the runners with GitHub.
+    # Self-hosted runners/agents need a second PAT to register them with the VCS.
     # Same rules as the main token: session env var only, BSTR freed immediately, never on disk.
     $plainRunners = $null
-    if ($GitHubRunnersToken) {
-        $bstr2 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($GitHubRunnersToken)
+    if ($VcsAgentsToken) {
+        $bstr2 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($VcsAgentsToken)
         $plainRunners = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr2)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2)
-        $env:TF_VAR_github_runners_personal_access_token = $plainRunners
+        Set-Item -Path "Env:$agentsVar" -Value $plainRunners
     }
 
     # Tell Terraform's azurerm provider to skip auto-registration. We pre-register the
@@ -139,8 +144,8 @@ function Invoke-ALZBootstrap {
     finally {
         if ($transcriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
         # Clear the tokens from the environment as soon as the run ends.
-        $env:TF_VAR_github_personal_access_token = $null
-        $env:TF_VAR_github_runners_personal_access_token = $null
+        Remove-Item -Path "Env:$tokenVar" -ErrorAction SilentlyContinue
+        Remove-Item -Path "Env:$agentsVar" -ErrorAction SilentlyContinue
         $env:ARM_RESOURCE_PROVIDER_REGISTRATIONS = $priorRpReg
         # Defense in depth: scrub the tokens from the transcript if they ever leaked into output.
         if ((Test-Path $transcript)) {
@@ -240,12 +245,21 @@ function Show-ALZManualSteps {
     Write-ALZBanner -Title 'Manual runbook - stage 2 onward' -Subtitle 'Do these yourself. Steps reflect the accelerator version you bootstrapped.'
 
     Write-ALZSection 'A. Deploy the platform (MGs, policies, management resources)'
-    Write-Host "  1. Open https://github.com/$org and pick the module repo - the one holding the" -ForegroundColor White
-    Write-Host "     '01 ... Continuous Integration' and '02 ... Continuous Delivery' workflows." -ForegroundColor White
-    Write-Host '  2. Actions tab -> select "02 ... Continuous Delivery" -> Run workflow -> branch main.' -ForegroundColor White
-    Write-Host '  3. It runs terraform plan first, then pauses on the Apply environment approval gate.' -ForegroundColor White
-    Write-Host '  4. Review the plan, then approve the deployment (you were added as an approver).' -ForegroundColor White
-    Write-Host '  5. Apply runs on a GitHub-hosted runner and authenticates to Azure via OIDC.' -ForegroundColor White
+    if ($a.vcs -eq 'azuredevops') {
+        Write-Host "  1. Open https://dev.azure.com/$($a.adoOrg)/$($a.adoProject) and go to Pipelines." -ForegroundColor White
+        Write-Host '  2. Select the "02 ... Continuous Delivery" pipeline -> Run pipeline -> branch main.' -ForegroundColor White
+        Write-Host '  3. It runs terraform plan first, then pauses on the Apply environment approval check.' -ForegroundColor White
+        Write-Host '  4. Review the plan, then approve the run (you were added as an approver).' -ForegroundColor White
+        Write-Host '  5. Apply authenticates to Azure via the workload identity federation service connection.' -ForegroundColor White
+    }
+    else {
+        Write-Host "  1. Open https://github.com/$org and pick the module repo - the one holding the" -ForegroundColor White
+        Write-Host "     '01 ... Continuous Integration' and '02 ... Continuous Delivery' workflows." -ForegroundColor White
+        Write-Host '  2. Actions tab -> select "02 ... Continuous Delivery" -> Run workflow -> branch main.' -ForegroundColor White
+        Write-Host '  3. It runs terraform plan first, then pauses on the Apply environment approval gate.' -ForegroundColor White
+        Write-Host '  4. Review the plan, then approve the deployment (you were added as an approver).' -ForegroundColor White
+        Write-Host '  5. Apply runs on a GitHub-hosted runner and authenticates to Azure via OIDC.' -ForegroundColor White
+    }
     Write-Host ''
     Write-Host '  This apply deploys:' -ForegroundColor DarkGray
     Write-Host '   - the full ALZ management-group hierarchy' -ForegroundColor DarkGray
@@ -272,6 +286,9 @@ function Show-ALZManualSteps {
 
     Write-ALZSection 'References (official)'
     Write-Host '  Phase 3 - Run:       https://azure.github.io/Azure-Landing-Zones/accelerator/3_run/' -ForegroundColor DarkCyan
+    if ($a.vcs -eq 'azuredevops') {
+        Write-Host '  Azure DevOps prereqs: https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/azuredevops/' -ForegroundColor DarkCyan
+    }
     Write-Host '  Terraform scenarios: https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/scenarios/' -ForegroundColor DarkCyan
     Write-Host '  Configuration files: https://azure.github.io/Azure-Landing-Zones/accelerator/configuration-files/' -ForegroundColor DarkCyan
     Write-Host '  Cleanup FAQ:         https://azure.github.io/Azure-Landing-Zones/accelerator/faq/cleanup/' -ForegroundColor DarkCyan

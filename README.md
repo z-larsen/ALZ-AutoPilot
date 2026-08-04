@@ -30,7 +30,7 @@ One entry point, a short interview, all prerequisite checks up front with exact 
 | **Runners** | GitHub-hosted, or self-hosted in a VNet with private networking |
 | **Regions** | Single and multi-region (a second region is collected when the scenario needs one) |
 | **Customization** | A custom ALZ library in `config/lib` is detected and passed through, so custom management groups, archetypes, and policy assignments deploy. See [samples/lib-pci](samples/lib-pci/README.md) |
-| **Version control** | GitHub. Azure DevOps and local are not currently supported |
+| **Version control** | GitHub end to end. Azure DevOps through config generation and bootstrap, then a printed runbook for stage 2. Local file system is not supported |
 
 The platform config is generated from the **official** scenario file for your choice, then it is yours to edit. Re-runs patch only the values the interview owns (regions, security contact, subscription placement) so hand edits survive.
 
@@ -120,8 +120,20 @@ ALZAutoPilot/
     scenarios-bicep/        # the official Bicep platform config
   samples/
     lib-pci/                # custom library example: regulated MG + PCI/HIPAA
+  tests/
+    Test-ALZConfigConformance.ps1   # offline: generated config vs the accelerator schema
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
+
+## Tests
+
+```powershell
+.\tests\Test-ALZConfigConformance.ps1
+```
+
+Parses `variables.tf` from the accelerator's own bootstrap modules and checks the generated `inputs.yaml` against it, across GitHub and Azure DevOps, Terraform and Bicep: every key emitted is one the module declares, every required variable is present, and the token is a placeholder rather than a credential. It runs entirely offline, with no Azure, GitHub, or Azure DevOps access.
+
+If the accelerator changes its schema in a new version, this fails locally instead of failing partway through someone's bootstrap. It skips cleanly when no bootstrap module has been downloaded yet.
 
 ## Security
 

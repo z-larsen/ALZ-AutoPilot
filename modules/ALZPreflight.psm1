@@ -211,6 +211,44 @@ function Test-ALZGitHubToken {
     return $results
 }
 
+function Test-ALZAdoToken {
+    param([string]$Token, [string]$Org, [string]$Project, [bool]$CreateProject)
+    $doc = 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/azuredevops/'
+    if (-not $Token) {
+        return New-ALZCheckResult 'Azure DevOps PAT' 'WARN' 'No token provided this session' 'The PAT is only needed for bootstrap. You will be prompted (masked) before the bootstrap runs.' $doc
+    }
+    # This check is advisory: it never returns FAIL. The Azure DevOps path has not been
+    # exercised end to end, so a quirk here must not block a run the bootstrap would accept.
+    $headers = @{ Authorization = "Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Token")))" }
+    $orgUri = "https://dev.azure.com/$([uri]::EscapeDataString($Org))/_apis/projects?api-version=7.1&`$top=200"
+    try {
+        $projects = Invoke-RestMethod -Uri $orgUri -Headers $headers -Method Get -ErrorAction Stop
+    }
+    catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        $rem = if ($code -eq 401 -or $code -eq 203) {
+            'The PAT was rejected. Create one scoped to this organization with Full access (or at minimum Code, Project and Team, Build, Release, Service Connections, Variable Groups, Agent Pools, Environment: Read & manage).'
+        }
+        else { "Confirm the organization name is '$Org' and that the PAT is scoped to it." }
+        return New-ALZCheckResult "Azure DevOps org: $Org" 'WARN' "Could not verify (HTTP $code)" "$rem The bootstrap validates this too, so this is advisory only." $doc
+    }
+    $results = @(New-ALZCheckResult "Azure DevOps org: $Org" 'OK' "Reachable, $($projects.count) project(s) visible")
+    $found = @($projects.value | Where-Object { $_.name -eq $Project }).Count -gt 0
+    if ($found -and $CreateProject) {
+        $results += New-ALZCheckResult "Azure DevOps project: $Project" 'WARN' 'Project already exists but you chose to create it' "Re-run the interview and answer No to creating the project, or pick a different project name." $doc
+    }
+    elseif ($found) {
+        $results += New-ALZCheckResult "Azure DevOps project: $Project" 'OK' 'Exists and is visible to this token'
+    }
+    elseif ($CreateProject) {
+        $results += New-ALZCheckResult "Azure DevOps project: $Project" 'OK' 'Does not exist yet, the bootstrap will create it'
+    }
+    else {
+        $results += New-ALZCheckResult "Azure DevOps project: $Project" 'WARN' 'Not found, and you chose not to create it' "Either create the project first, or re-run the interview and answer Yes to creating it." $doc
+    }
+    return $results
+}
+
 function Test-ALZHcpWorkspace {
     param([string]$Token, [string]$HcpOrg, [string]$Workspace)
     if (-not $Token) {
@@ -233,4 +271,4 @@ function Test-ALZHcpWorkspace {
     }
 }
 
-Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZHcpWorkspace
+Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZHcpWorkspace

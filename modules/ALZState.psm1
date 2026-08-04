@@ -39,7 +39,11 @@ function New-ALZState {
             deliveryName            = ''
             region                  = ''
             regionSecondary         = ''
+            vcs                     = 'github'
             githubOrg               = ''
+            adoOrg                  = ''
+            adoProject              = ''
+            adoCreateProject        = $true
             securityContactEmail    = ''
             subscriptions           = [ordered]@{ management = ''; connectivity = ''; identity = ''; security = '' }
             parentManagementGroupId = ''

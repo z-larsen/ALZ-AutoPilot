@@ -12,7 +12,7 @@
 # Description:
 # Wraps the official ALZ accelerator without changing what it does:
 # 1. Plan - short interview, answers saved after every step.
-# 2. Prerequisites - tooling, Azure Owner, resource providers, GitHub, HCP.
+# 2. Prerequisites - tooling, Azure Owner, resource providers, VCS, HCP.
 # 3. Generate config - writes inputs.yaml (no hand-editing scattered files).
 # 4. Bootstrap - runs Deploy-Accelerator and translates known errors.
 # 5. Guided next steps - HCP state migration and the day-2 operating model.
@@ -25,7 +25,8 @@
 #
 # Prerequisites:
 # - PowerShell 7.4+, Azure CLI signed in (az login)
-# - A GitHub organization and a fine-grained PAT (entered masked, never stored)
+# - A GitHub organization, or an Azure DevOps organization and project
+# - A fine-grained PAT for that system (entered masked, never stored)
 #
 # Usage: .\Start-ALZDelivery.ps1 -DeliveryPath "C:\...\ALZ\My Tenant"
 ###########################################################################
@@ -198,14 +199,27 @@ if ($runPreflight) {
         Write-ALZStatus -Status RUN -Message "Checking $($providers.Count) resource providers on the current subscription..."
         $r = Test-ALZResourceProviders -Providers $providers; Write-ALZResults $r; $results += $r
 
-        $ghToken = $null
-        if (Read-ALZConfirm -Prompt 'Validate the GitHub PAT and org now (recommended)?' -Default $true) {
-            $sec = Read-Host -Prompt '  Paste GitHub PAT (input hidden)' -AsSecureString
-            $ghToken = ConvertTo-ALZPlainText -Secure $sec
+        if ($state.answers.vcs -eq 'azuredevops') {
+            $adoToken = $null
+            if (Read-ALZConfirm -Prompt 'Validate the Azure DevOps PAT, org and project now (recommended)?' -Default $true) {
+                $sec = Read-Host -Prompt '  Paste Azure DevOps PAT (input hidden)' -AsSecureString
+                $adoToken = ConvertTo-ALZPlainText -Secure $sec
+            }
+            Write-ALZStatus -Status RUN -Message 'Checking Azure DevOps PAT, organization, and project...'
+            $r = Test-ALZAdoToken -Token $adoToken -Org $state.answers.adoOrg -Project $state.answers.adoProject -CreateProject ([bool]$state.answers.adoCreateProject)
+            Write-ALZResults $r; $results += $r
+            $adoToken = $null
         }
-        Write-ALZStatus -Status RUN -Message 'Checking GitHub PAT, org access, and Members permission...'
-        $r = Test-ALZGitHubToken -Token $ghToken -Org $state.answers.githubOrg; Write-ALZResults $r; $results += $r
-        $ghToken = $null
+        else {
+            $ghToken = $null
+            if (Read-ALZConfirm -Prompt 'Validate the GitHub PAT and org now (recommended)?' -Default $true) {
+                $sec = Read-Host -Prompt '  Paste GitHub PAT (input hidden)' -AsSecureString
+                $ghToken = ConvertTo-ALZPlainText -Secure $sec
+            }
+            Write-ALZStatus -Status RUN -Message 'Checking GitHub PAT, org access, and Members permission...'
+            $r = Test-ALZGitHubToken -Token $ghToken -Org $state.answers.githubOrg; Write-ALZResults $r; $results += $r
+            $ghToken = $null
+        }
 
         if ($state.answers.stateBackend -eq 'hcp') {
             $hcpToken = $null
@@ -300,6 +314,8 @@ if (-not (Read-ALZConfirm -Prompt 'Configuration reviewed and ready to bootstrap
 }
 
 # ---- Phase: Bootstrap --------------------------------------------------
+# Defined before the phase so it survives a resume where the bootstrap is skipped.
+$isAdo = ($state.answers.vcs -eq 'azuredevops')
 Write-ALZProgress -CurrentPhase 'bootstrap' -SkipPhases $skip
 $runBootstrap = $true
 if ($state.phaseStatus.bootstrap -eq 'done') {
@@ -314,19 +330,21 @@ if ($runBootstrap) {
     Set-ALZCurrentPhase -State $state -Phase 'bootstrap'
     Install-ALZModuleIfNeeded
 
-    Write-ALZStatus -Status INFO -Message 'The GitHub PAT is used only for this run and is never written to disk.'
-    $sec = Read-Host -Prompt '  Paste GitHub PAT for bootstrap (input hidden)' -AsSecureString
+    $vcsLabel = if ($isAdo) { 'Azure DevOps' } else { 'GitHub' }
+    Write-ALZStatus -Status INFO -Message "The $vcsLabel PAT is used only for this run and is never written to disk."
+    $sec = Read-Host -Prompt "  Paste $vcsLabel PAT for bootstrap (input hidden)" -AsSecureString
 
-    # Self-hosted runners need a second PAT (token-2, "Runner Registration") to register
-    # the in-VNet runners with GitHub. Collected masked, used only for this run.
+    # Self-hosted runners/agents need a second PAT to register them with the VCS.
+    # Collected masked, used only for this run.
     $runnersSec = $null
     if ($state.answers.selfHostedRunners) {
-        Write-ALZStatus -Status INFO -Message 'Self-hosted runners are enabled - a second PAT (Runner Registration) is required.'
-        $runnersSec = Read-Host -Prompt '  Paste GitHub Runner Registration PAT (input hidden)' -AsSecureString
+        $secondLabel = if ($isAdo) { 'Azure DevOps Agent Pools' } else { 'GitHub Runner Registration' }
+        Write-ALZStatus -Status INFO -Message "Self-hosted $(if ($isAdo) { 'agents' } else { 'runners' }) are enabled - a second PAT ($secondLabel) is required."
+        $runnersSec = Read-Host -Prompt "  Paste $secondLabel PAT (input hidden)" -AsSecureString
     }
 
     Write-ALZStatus -Status RUN -Message 'Starting bootstrap (this creates the two repos and Azure identity resources)...'
-    $boot = Invoke-ALZBootstrap -State $state -DataPath $dataPath -GitHubToken $sec -GitHubRunnersToken $runnersSec
+    $boot = Invoke-ALZBootstrap -State $state -DataPath $dataPath -VcsToken $sec -VcsAgentsToken $runnersSec
     Add-ALZStat -State $state -Name 'bootstrapRuns'
 
     if ($boot.Failed) {
@@ -344,20 +362,26 @@ if ($runBootstrap) {
 
     # Verify the repos actually received the workflows. A PAT missing "Workflows: Read
     # and write" makes GitHub reject the module push (atomic), leaving empty repos.
-    Write-ALZStatus -Status RUN -Message 'Verifying the module repo received its CI/CD workflows...'
-    $vtok = ConvertTo-ALZPlainText -Secure $sec
-    try {
-        $vrepo = Find-ALZModuleRepo -Token $vtok -Org $state.answers.githubOrg
-        if (-not $vrepo) {
-            Set-ALZPhaseStatus -State $state -Phase 'bootstrap' -Status 'failed'
-            Write-ALZStatus -Status FAIL -Message 'The module repo has no CI/CD workflows - the bootstrap push was incomplete.'
-            Write-ALZRemediation -Title 'Repos created but the workflows/module were not pushed' -Remediation 'GitHub rejects a push containing .github/workflows files if the PAT lacks the Workflows permission, so the whole module push fails. Fix: (1) add Repository > Workflows: Read and write (and confirm Contents, Administration, Actions, Environments, Secrets, Variables + Organization > Members) to the PAT. (2) If a plain bootstrap re-run still leaves the repos empty, Terraform state thinks the content already exists - delete the two repos in GitHub, then re-run this app and re-run the bootstrap so they are recreated and fully pushed.' -DocUrl 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
-            $vtok = $null
-            return
-        }
-        Write-ALZStatus -Status OK -Message "Verified: '$($vrepo.Repo)' has the CI/CD workflows."
+    # This check is GitHub-API specific, so it is skipped on Azure DevOps.
+    if ($isAdo) {
+        Write-ALZStatus -Status INFO -Message 'Skipping the repo verification step on Azure DevOps.' -Detail "Confirm the two repos and their pipelines exist: https://dev.azure.com/$($state.answers.adoOrg)/$($state.answers.adoProject)"
     }
-    finally { $vtok = $null }
+    else {
+        Write-ALZStatus -Status RUN -Message 'Verifying the module repo received its CI/CD workflows...'
+        $vtok = ConvertTo-ALZPlainText -Secure $sec
+        try {
+            $vrepo = Find-ALZModuleRepo -Token $vtok -Org $state.answers.githubOrg
+            if (-not $vrepo) {
+                Set-ALZPhaseStatus -State $state -Phase 'bootstrap' -Status 'failed'
+                Write-ALZStatus -Status FAIL -Message 'The module repo has no CI/CD workflows - the bootstrap push was incomplete.'
+                Write-ALZRemediation -Title 'Repos created but the workflows/module were not pushed' -Remediation 'GitHub rejects a push containing .github/workflows files if the PAT lacks the Workflows permission, so the whole module push fails. Fix: (1) add Repository > Workflows: Read and write (and confirm Contents, Administration, Actions, Environments, Secrets, Variables + Organization > Members) to the PAT. (2) If a plain bootstrap re-run still leaves the repos empty, Terraform state thinks the content already exists - delete the two repos in GitHub, then re-run this app and re-run the bootstrap so they are recreated and fully pushed.' -DocUrl 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
+                $vtok = $null
+                return
+            }
+            Write-ALZStatus -Status OK -Message "Verified: '$($vrepo.Repo)' has the CI/CD workflows."
+        }
+        finally { $vtok = $null }
+    }
 }
 
 # ---- Stage 2: deploy the platform (choose CLI or manual) ---------------
@@ -365,13 +389,28 @@ Write-ALZProgress -CurrentPhase 'proof' -SkipPhases $skip
 Write-ALZBanner -Title 'Bootstrap done - stage 2: deploy the platform' -Subtitle 'MGs, policies, and management resources deploy via the pipeline.'
 Write-Host '  Two-stage model:' -ForegroundColor White
 Write-Host '  - Bootstrap (done): the two repos, OIDC identities, and Terraform state.' -ForegroundColor DarkGray
-Write-Host '  - Next: the "02 Continuous Delivery" workflow runs terraform apply on a' -ForegroundColor DarkGray
-Write-Host '    GitHub-hosted runner (OIDC to Azure, no local Terraform) to deploy the' -ForegroundColor DarkGray
-Write-Host '    management-group hierarchy, the ALZ policy assignments, and management resources.' -ForegroundColor DarkGray
+if ($isAdo) {
+    Write-Host '  - Next: the "02 Continuous Delivery" pipeline runs terraform apply to deploy the' -ForegroundColor DarkGray
+    Write-Host '    management-group hierarchy, the ALZ policy assignments, and management resources.' -ForegroundColor DarkGray
+}
+else {
+    Write-Host '  - Next: the "02 Continuous Delivery" workflow runs terraform apply on a' -ForegroundColor DarkGray
+    Write-Host '    GitHub-hosted runner (OIDC to Azure, no local Terraform) to deploy the' -ForegroundColor DarkGray
+    Write-Host '    management-group hierarchy, the ALZ policy assignments, and management resources.' -ForegroundColor DarkGray
+}
 Write-Host ''
-Write-Host '    1. Guided in this CLI  - discover the repo, trigger + watch the pipeline, verify' -ForegroundColor White
-Write-Host '    2. Manual              - print the step-by-step runbook and do it yourself' -ForegroundColor White
-$stage2 = Read-ALZValue -Prompt 'Proceed with stage 2 in the CLI, or print the manual steps? (1/2)' -Default '1' -Validator { param($v) $v -in @('1', '2') }
+
+# Triggering, watching, and verifying the pipeline is implemented against the GitHub API
+# only. Rather than guess at the Azure DevOps equivalent, this path prints the runbook.
+if ($isAdo) {
+    Write-ALZStatus -Status INFO -Message 'Azure DevOps: stage 2 is a printed runbook.' -Detail 'Pipeline triggering and watching is automated for GitHub only today.'
+    $stage2 = '2'
+}
+else {
+    Write-Host '    1. Guided in this CLI  - discover the repo, trigger + watch the pipeline, verify' -ForegroundColor White
+    Write-Host '    2. Manual              - print the step-by-step runbook and do it yourself' -ForegroundColor White
+    $stage2 = Read-ALZValue -Prompt 'Proceed with stage 2 in the CLI, or print the manual steps? (1/2)' -Default '1' -Validator { param($v) $v -in @('1', '2') }
+}
 
 if ($stage2 -eq '2') {
     Show-ALZManualSteps -State $state -DataPath $dataPath

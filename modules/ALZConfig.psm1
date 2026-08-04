@@ -29,6 +29,8 @@ function Test-ALZGuidOrEmpty { param([string]$v) return ([string]::IsNullOrWhite
 function Test-ALZGitHubName { param([string]$v) return $v -match '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$' }
 function Test-ALZNotEmpty { param([string]$v) return -not [string]::IsNullOrWhiteSpace($v) }
 function Test-ALZEmail { param([string]$v) return $v -match '^[^@\s]+@[^@\s]+\.[^@\s]+$' }
+# Azure DevOps org and project names allow spaces and a wider character set than GitHub org names.
+function Test-ALZAdoName { param([string]$v) return ($v -match '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,62}$') }
 
 function Invoke-ALZInterview {
     param([hashtable]$State, [string]$DataPath)
@@ -40,7 +42,23 @@ function Invoke-ALZInterview {
 
     $a.deliveryName = Read-ALZValue -Prompt 'Delivery / tenant name (used for the output folder)' -Default $(if ($a.deliveryName) { $a.deliveryName } else { 'My Tenant' }) -Validator ${function:Test-ALZNotEmpty}
     $a.region = Read-ALZValue -Prompt 'Primary Azure region (e.g. southcentralus)' -Default $a.region -Validator ${function:Test-ALZRegionName} -ValidationMessage 'Use the lowercase region name, e.g. eastus2 or southcentralus.'
-    $a.githubOrg = Read-ALZValue -Prompt 'GitHub organization name' -Default $a.githubOrg -Validator ${function:Test-ALZGitHubName} -ValidationMessage 'Enter a valid GitHub org name (letters, numbers, hyphens).'
+
+    Write-ALZSection 'Version control system'
+    Write-Host '  The accelerator creates its two repos and its pipelines in one of these.' -ForegroundColor DarkGray
+    Write-Host '    1. GitHub         - fully guided, including triggering and watching the pipeline' -ForegroundColor White
+    Write-Host '    2. Azure DevOps   - guided through bootstrap, then a printed runbook for stage 2' -ForegroundColor White
+    $vcsPick = Read-ALZValue -Prompt 'Choose the version control system (1/2)' -Default $(if ($a.vcs -eq 'azuredevops') { '2' } else { '1' }) -Validator { param($v) $v -in @('1', '2') }
+    $a.vcs = if ($vcsPick -eq '2') { 'azuredevops' } else { 'github' }
+
+    if ($a.vcs -eq 'azuredevops') {
+        Write-ALZStatus -Status INFO -Message 'Azure DevOps: config generation and bootstrap are automated; stage 2 is a printed runbook.' -Detail 'Triggering and watching the pipeline is only automated for GitHub today.'
+        $a.adoOrg = Read-ALZValue -Prompt 'Azure DevOps organization name (the name only, not the URL)' -Default $a.adoOrg -Validator ${function:Test-ALZAdoName} -ValidationMessage 'Enter just the organization name, e.g. contoso (not https://dev.azure.com/contoso).'
+        $a.adoProject = Read-ALZValue -Prompt 'Azure DevOps project name' -Default $(if ($a.adoProject) { $a.adoProject } else { 'ALZ' }) -Validator ${function:Test-ALZAdoName}
+        $a.adoCreateProject = Read-ALZConfirm -Prompt "Create the project '$($a.adoProject)' (No = it already exists)?" -Default ([bool]$a.adoCreateProject)
+    }
+    else {
+        $a.githubOrg = Read-ALZValue -Prompt 'GitHub organization name' -Default $a.githubOrg -Validator ${function:Test-ALZGitHubName} -ValidationMessage 'Enter a valid GitHub org name (letters, numbers, hyphens).'
+    }
 
     Write-ALZSection 'Platform subscriptions (GUIDs)'
     Write-Host '  Four separate subscriptions are recommended. Management and Connectivity are' -ForegroundColor DarkGray
@@ -64,13 +82,26 @@ function Invoke-ALZInterview {
 
     Write-ALZSection 'Management group and approvers'
     $a.parentManagementGroupId = Read-ALZValue -Prompt 'Parent management group ID (Enter for Tenant Root Group)' -Default $a.parentManagementGroupId -Validator { param($v) [string]::IsNullOrWhiteSpace($v) -or $v -match '^[A-Za-z0-9._()-]{1,90}$' } -ValidationMessage 'Use letters, numbers, and . _ - ( ) only, or leave blank for Tenant Root Group.'
-    $approvers = Read-ALZValue -Prompt 'Apply approvers (comma-separated GitHub usernames)' -Default ($a.applyApprovers -join ',') -Validator {
-        param($v)
-        if ([string]::IsNullOrWhiteSpace($v)) { return $false }
-        $names = $v -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        if (-not $names) { return $false }
-        return @($names | Where-Object { $_ -notmatch '^[A-Za-z0-9-]{1,39}$' }).Count -eq 0
-    } -ValidationMessage 'Each approver must be a valid GitHub username (letters, numbers, hyphens; max 39).'
+    # The two systems identify approvers differently: GitHub takes usernames, Azure DevOps
+    # takes sign-in addresses ("Must be a list of SPNs" per the bootstrap module).
+    if ($a.vcs -eq 'azuredevops') {
+        $approvers = Read-ALZValue -Prompt 'Apply approvers (comma-separated Azure DevOps sign-in emails)' -Default ($a.applyApprovers -join ',') -Validator {
+            param($v)
+            if ([string]::IsNullOrWhiteSpace($v)) { return $false }
+            $names = $v -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            if (-not $names) { return $false }
+            return @($names | Where-Object { -not (Test-ALZEmail $_) }).Count -eq 0
+        } -ValidationMessage 'Each approver must be a valid email address, e.g. jane@contoso.com.'
+    }
+    else {
+        $approvers = Read-ALZValue -Prompt 'Apply approvers (comma-separated GitHub usernames)' -Default ($a.applyApprovers -join ',') -Validator {
+            param($v)
+            if ([string]::IsNullOrWhiteSpace($v)) { return $false }
+            $names = $v -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            if (-not $names) { return $false }
+            return @($names | Where-Object { $_ -notmatch '^[A-Za-z0-9-]{1,39}$' }).Count -eq 0
+        } -ValidationMessage 'Each approver must be a valid GitHub username (letters, numbers, hyphens; max 39).'
+    }
     $a.applyApprovers = @($approvers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $a.securityContactEmail = Read-ALZValue -Prompt 'Microsoft Defender security contact email' -Default $a.securityContactEmail -Validator ${function:Test-ALZEmail} -ValidationMessage 'Enter a valid email address.'
 
@@ -154,12 +185,14 @@ function Invoke-ALZInterview {
     }
 
     Write-ALZSection 'Runner and network security'
+    $agentWord = if ($a.vcs -eq 'azuredevops') { 'agents' } else { 'runners' }
+    $tokenWord = if ($a.vcs -eq 'azuredevops') { 'Azure DevOps PAT (Agent Pools: Read & manage)' } else { 'GitHub PAT (Runner Registration)' }
     Write-Host '  Many governed tenants enforce a policy that disables public network access on' -ForegroundColor DarkGray
     Write-Host '  storage. The Terraform state store is then reachable only over a private endpoint,' -ForegroundColor DarkGray
-    Write-Host '  so the pipeline must run on self-hosted runners inside a VNet. Turning this on has' -ForegroundColor DarkGray
+    Write-Host "  so the pipeline must run on self-hosted $agentWord inside a VNet. Turning this on has" -ForegroundColor DarkGray
     Write-Host '  the accelerator deploy a VNet, private endpoint, container registry, and container-' -ForegroundColor DarkGray
-    Write-Host '  based runners, and it needs a second GitHub PAT (Runner Registration) at bootstrap.' -ForegroundColor DarkGray
-    $secure = Read-ALZConfirm -Prompt 'Use private networking + self-hosted runners? (recommended for policy-governed tenants)' -Default ([bool]$a.privateNetworking)
+    Write-Host "  based $agentWord, and it needs a second $tokenWord at bootstrap." -ForegroundColor DarkGray
+    $secure = Read-ALZConfirm -Prompt "Use private networking + self-hosted $agentWord`? (recommended for policy-governed tenants)" -Default ([bool]$a.privateNetworking)
     $a.privateNetworking = $secure
     $a.selfHostedRunners = $secure
 
@@ -178,7 +211,6 @@ function Write-ALZInputsYaml {
     $san = { param($v) if ($null -eq $v) { '' } else { ($v -replace '["\r\n\\]', '').Trim() } }
     $region = & $san $a.region
     $parentMg = if ($a.parentManagementGroupId) { & $san $a.parentManagementGroupId } else { '' }
-    $org = & $san $a.githubOrg
     $subMgmt = & $san $a.subscriptions.management
     $subIdentity = & $san $a.subscriptions.identity
     $subConn = & $san $a.subscriptions.connectivity
@@ -196,9 +228,45 @@ function Write-ALZInputsYaml {
     $selfHosted = if ($a.selfHostedRunners) { 'true' } else { 'false' }
     $privateNet = if ($a.privateNetworking) { 'true' } else { 'false' }
     $iac = if ($a.iacType -eq 'bicep') { 'bicep' } else { 'terraform' }
-    # When self-hosted runners are enabled the runner-registration PAT (token-2) is supplied
-    # via env var at bootstrap time, mirroring the main PAT - it is never written to disk.
-    $runnersToken = if ($a.selfHostedRunners) { 'Set via environment variable TF_VAR_github_runners_personal_access_token' } else { '' }
+
+    # The GitHub and Azure DevOps bootstrap modules take different names for the same
+    # concepts (runners vs agents, org vs org+project). Everything outside this block is
+    # identical between them. Tokens are supplied via env var at bootstrap time and are
+    # never written to disk, mirroring the GitHub path.
+    if ($a.vcs -eq 'azuredevops') {
+        $adoOrg = & $san $a.adoOrg
+        $adoProject = & $san $a.adoProject
+        $createProject = if ($a.adoCreateProject) { 'true' } else { 'false' }
+        $agentsToken = if ($a.selfHostedRunners) { 'Set via environment variable TF_VAR_azure_devops_agents_personal_access_token' } else { '' }
+        $bootstrapModule = 'alz_azuredevops'
+        $tokenNote = 'TF_VAR_azure_devops_personal_access_token'
+        $vcsBlock = @"
+use_self_hosted_agents: $selfHosted
+use_private_networking: $privateNet
+
+azure_devops_personal_access_token: "Set via environment variable TF_VAR_azure_devops_personal_access_token"
+azure_devops_agents_personal_access_token: "$agentsToken"
+azure_devops_organization_name: "$adoOrg"
+azure_devops_project_name: "$adoProject"
+azure_devops_create_project: $createProject
+apply_approvers: [$approvers]
+"@
+    }
+    else {
+        $org = & $san $a.githubOrg
+        $runnersToken = if ($a.selfHostedRunners) { 'Set via environment variable TF_VAR_github_runners_personal_access_token' } else { '' }
+        $bootstrapModule = 'alz_github'
+        $tokenNote = 'TF_VAR_github_personal_access_token'
+        $vcsBlock = @"
+use_self_hosted_runners: $selfHosted
+use_private_networking: $privateNet
+
+github_personal_access_token: "Set via environment variable TF_VAR_github_personal_access_token"
+github_runners_personal_access_token: "$runnersToken"
+github_organization_name: "$org"
+apply_approvers: [$approvers]
+"@
+    }
 
     # A custom ALZ library (custom management groups, archetypes, policy definitions and
     # assignments) lives in <config>\lib. Passing explicit config paths disables the
@@ -213,8 +281,8 @@ function Write-ALZInputsYaml {
     $yaml = @"
 ---
 # Generated by the ALZ Delivery Orchestrator. Safe to edit.
-# The GitHub PAT is NOT stored here - it is supplied via the
-# TF_VAR_github_personal_access_token environment variable at bootstrap time.
+# The personal access token is NOT stored here - it is supplied via the
+# $tokenNote environment variable at bootstrap time.
 
 bootstrap_location: "$region"
 
@@ -229,16 +297,10 @@ service_name: "alz"
 environment_name: "mgmt"
 postfix_number: 1
 
-use_self_hosted_runners: $selfHosted
-use_private_networking: $privateNet
-
-github_personal_access_token: "Set via environment variable TF_VAR_github_personal_access_token"
-github_runners_personal_access_token: "$runnersToken"
-github_organization_name: "$org"
-apply_approvers: [$approvers]
+$vcsBlock
 
 iac_type: "$iac"
-bootstrap_module_name: "alz_github"
+bootstrap_module_name: "$bootstrapModule"
 starter_module_name: "platform_landing_zone"$additionalFiles
 "@
     $yaml | Set-Content -Path $path -Encoding UTF8

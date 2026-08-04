@@ -213,7 +213,8 @@ The app matches failures against a catalog of known signatures and prints the fi
 
 | | |
 |---|---|
-| Azure DevOps and local file system | The app targets GitHub. Use the official accelerator directly for these |
+| Local file system VCS | The app targets GitHub and Azure DevOps. Use the official accelerator directly for local |
+| Azure DevOps stage 2 | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only today, so Azure DevOps prints the runbook instead |
 | `bicep-classic` | The accelerator accepts it; this app offers Terraform and Bicep only |
 | Automatic editing of your repos | The HCP migration is verified, not applied. Editing a customer's IaC blind is riskier than checking it |
 
