@@ -1,13 +1,7 @@
 <!-- markdownlint-disable -->
-```
-       _    _      _____
-      / \  | |    |__  /
-     / _ \ | |      / /
-    / ___ \| |___  / /_
-   /_/   \_\_____|/____|
-
-   A U T O P I L O T
-```
+<p align="center">
+  <img src="ALZAutoPilot.png" alt="ALZ Autopilot" width="760">
+</p>
 
 # ALZ Autopilot: How to Use
 
