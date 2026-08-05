@@ -53,6 +53,7 @@ Import-Module (Join-Path $modulePath 'ALZPreflight.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZConfig.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZOrchestrator.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZPipeline.psm1') -Force
+Import-Module (Join-Path $modulePath 'ALZReport.psm1') -Force
 
 if (-not $NoClear) { try { Clear-Host } catch { } }
 Write-ALZSplash -Version '1.0.0'
@@ -284,6 +285,17 @@ else {
     }
     $tfvarsPath = Write-ALZStarterTfvars -State $state -ConfigFolder $configFolder -DataPath $dataPath
     Write-ALZStatus -Status OK -Message "Wrote platform-landing-zone.tfvars ($($state.answers.scenario))" -Detail $tfvarsPath
+
+    $fmt = Repair-ALZTfvarsFormat -ConfigFolder $configFolder
+    if (-not $fmt.Checked) {
+        Write-ALZStatus -Status INFO -Message 'Skipped the terraform fmt check (terraform not on PATH).' -Detail 'The CI workflow runs terraform fmt -check, so verify formatting before opening a pull request.'
+    }
+    elseif ($fmt.Fixed.Count -gt 0 -and $fmt.Clean) {
+        Write-ALZStatus -Status OK -Message 'Reformatted the config to satisfy the CI fmt check.' -Detail "terraform fmt updated: $($fmt.Fixed -join ', '). The CI workflow fails the build on unformatted files, which would block every pull request."
+    }
+    elseif (-not $fmt.Clean) {
+        Write-ALZStatus -Status WARN -Message 'The config is not terraform fmt clean.' -Detail 'The 01 Continuous Integration workflow runs terraform fmt -check and will fail on every pull request until this is fixed. Run: terraform fmt'
+    }
 }
 Set-ALZPhaseStatus -State $state -Phase 'config' -Status 'done'
 
@@ -542,6 +554,13 @@ if (-not $summaryPlatform) {
     try { $summaryPlatform = Test-ALZPlatformDeployed } catch { }
 }
 Save-ALZState -State $state
-Write-ALZSummary -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart
+$reportPath = $null
+try { $reportPath = New-ALZDeliveryReport -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -DataPath $dataPath }
+catch { Write-ALZStatus -Status WARN -Message 'Could not write the HTML report.' -Detail $_.Exception.Message }
+Write-ALZSummary -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -ReportPath $reportPath
+
+if ($reportPath -and (Read-ALZConfirm -Prompt 'Open the delivery report now?' -Default $false)) {
+    try { Start-Process $reportPath } catch { Write-ALZStatus -Status WARN -Message 'Could not open the report automatically.' -Detail $reportPath }
+}
 
 Write-ALZStatus -Status OK -Message 'Orchestrator finished. State saved for the next session.'

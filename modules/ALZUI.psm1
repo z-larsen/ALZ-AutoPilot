@@ -315,8 +315,11 @@ function Write-ALZSummary {
         $Run,
         [string[]]$ResourceGroups = @(),
         $Repo,
-        [datetime]$SessionStart
+        [datetime]$SessionStart,
+        [string]$ReportPath
     )
+    # Deliberately short. The full detail goes to the HTML report so the console
+    # ends with the few things worth reading, plus where to find the rest.
     $a = $State.answers
     $w = Get-ALZRuleWidth
     $inner = $w - 2
@@ -326,73 +329,37 @@ function Write-ALZSummary {
     Write-Host (' DELIVERY SUMMARY'.PadRight($inner)) -ForegroundColor Cyan -NoNewline
     Write-Host '|' -ForegroundColor DarkCyan
     Write-Host ('  +' + ('-' * $inner) + '+') -ForegroundColor DarkCyan
+    Write-Host ''
 
     $row = { param($k, $v, $c = 'White') Write-Host ('   {0,-24}' -f $k) -ForegroundColor DarkGray -NoNewline; Write-Host $v -ForegroundColor $c }
-    $head = { param($t) Write-Host ''; Write-Host "  $t" -ForegroundColor White; Write-Host ('  ' + ('-' * $inner)) -ForegroundColor DarkGray }
 
-    & $head 'Target'
     & $row 'Delivery' $a.deliveryName
-    & $row 'Region' $a.region
-    if ($a.regionSecondary) { & $row 'Secondary region' $a.regionSecondary }
-    & $row 'IaC language' $a.iacType
-    & $row 'Scenario' $(if ($a.iacType -eq 'bicep') { "network_type: $($a.bicepNetworkType)" } else { $a.scenario })
-    if ($a.vcs -eq 'azuredevops') { & $row 'Azure DevOps' "$($a.adoOrg)/$($a.adoProject)" } else { & $row 'GitHub org' $a.githubOrg }
-    $subCount = @($a.subscriptions.Values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
-    & $row 'Platform subscriptions' $subCount
-    & $row 'State backend' $(if ($a.stateBackend -eq 'hcp') { 'HCP Terraform' } else { 'Azure Storage' })
-    & $row 'Runners' $(if ($a.selfHostedRunners) { 'Self-hosted (private networking)' } elseif ($a.vcs -eq 'azuredevops') { 'Microsoft-hosted agents' } else { 'GitHub-hosted' })
-
-    & $head 'Deployed this delivery'
-    if ($Repo) {
-        & $row 'Module repo' "$($a.githubOrg)/$($Repo.Repo)" 'Green'
-        & $row 'CD workflow' $Repo.CdName 'Green'
-    }
-    if ($ResourceGroups.Count -gt 0) {
-        & $row 'Resource groups' $ResourceGroups.Count 'Green'
-        foreach ($rg in $ResourceGroups) { Write-Host "     - $rg" -ForegroundColor DarkGray }
-    }
+    & $row 'Topology' $(if ($a.iacType -eq 'bicep') { "Bicep, network_type: $($a.bicepNetworkType)" } else { $a.scenario })
+    if ($Repo) { & $row 'Module repo' $Repo.Repo 'Green' }
     if ($Platform) {
         & $row 'Management groups' $Platform.ManagementGroups 'Green'
         & $row 'Policy assignments' $Platform.PolicyAssignments 'Green'
     }
 
     if ($Run) {
-        & $head 'Last pipeline run'
         $concl = if ($Run.Conclusion) { $Run.Conclusion } else { $Run.State }
-        & $row 'Result' $concl $(if ($concl -eq 'success') { 'Green' } else { 'Yellow' })
-        if ($Run.Url) { & $row 'Run' $Run.Url 'DarkCyan' }
+        & $row 'Last pipeline run' $concl $(if ($concl -eq 'success') { 'Green' } else { 'Yellow' })
     }
 
-    & $head 'Progress'
-    foreach ($p in $script:PhaseOrder) {
-        if ($p -eq 'complete') { continue }
-        $st = $State.phaseStatus.$p
-        $mark, $col = switch ($st) {
-            'done' { '[ OK ]', 'Green' }
-            'failed' { '[FAIL]', 'Red' }
-            'skipped' { '[ -- ]', 'DarkGray' }
-            default { '[ .. ]', 'DarkGray' }
-        }
-        $took = ''
-        if ($State.phaseSeconds -and $State.phaseSeconds[$p]) { $took = Format-ALZDuration ([double]$State.phaseSeconds[$p]) }
-        Write-Host "   $mark " -ForegroundColor $col -NoNewline
-        Write-Host ('{0,-22}' -f $script:PhaseLabels[$p]) -ForegroundColor White -NoNewline
-        Write-Host ('{0,-10}' -f $st) -ForegroundColor DarkGray -NoNewline
-        Write-Host $took -ForegroundColor DarkCyan
+    $done = @($script:PhaseOrder | Where-Object { $_ -ne 'complete' -and $State.phaseStatus.$_ -eq 'done' }).Count
+    $failedPhases = @($script:PhaseOrder | Where-Object { $_ -ne 'complete' -and $State.phaseStatus.$_ -eq 'failed' })
+    $total = @($script:PhaseOrder | Where-Object { $_ -ne 'complete' }).Count
+    & $row 'Phases complete' "$done of $total" $(if ($failedPhases.Count) { 'Yellow' } else { 'Green' })
+    if ($failedPhases.Count) {
+        & $row 'Failed' (($failedPhases | ForEach-Object { $script:PhaseLabels[$_] }) -join ', ') 'Red'
     }
+    if ($SessionStart) { & $row 'Session time' ('{0:hh\:mm\:ss}' -f ((Get-Date) - $SessionStart)) }
 
-    & $head 'Stats'
-    if ($SessionStart) { & $row 'This session' ('{0:hh\:mm\:ss}' -f ((Get-Date) - $SessionStart)) }
-    if ($State.stats) {
-        & $row 'Sessions' $State.stats.sessions
-        & $row 'Bootstrap runs' $State.stats.bootstrapRuns
-        & $row 'Pipeline runs watched' $State.stats.pipelineRuns
+    if ($ReportPath) {
+        Write-Host ''
+        Write-Host '   Full detail, including per-phase timings and everything deployed:' -ForegroundColor DarkGray
+        Write-Host "   $ReportPath" -ForegroundColor Cyan
     }
-    if ($State.createdUtc) {
-        $age = (Get-Date).ToUniversalTime() - [datetime]::Parse($State.createdUtc).ToUniversalTime()
-        & $row 'Delivery age' ('{0}d {1}h' -f [int]$age.TotalDays, $age.Hours)
-    }
-    & $row 'Delivery folder' $State.deliveryPath 'DarkGray'
 
     Write-Host ''
     Write-Host ('  +' + ('-' * $inner) + '+') -ForegroundColor DarkCyan

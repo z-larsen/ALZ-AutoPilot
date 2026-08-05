@@ -434,4 +434,26 @@ function Test-ALZTfvarsMatchesScenario {
     return ($marker -eq $expected)
 }
 
-Export-ModuleMember -Function Invoke-ALZInterview, Write-ALZInputsYaml, Set-ALZTfvarsRegion, Set-ALZTfvarsSubscriptionPlacement, Write-ALZStarterTfvars, Test-ALZTfvarsMatchesScenario, Write-ALZBicepConfig
+# The accelerator's CI workflow runs `terraform fmt -check` and fails the build on a
+# non-zero exit, so an unformatted tfvars blocks every future pull request. Catch it
+# here instead. Formatting is whitespace-only, so fixing it cannot change behaviour.
+function Repair-ALZTfvarsFormat {
+    param([string]$ConfigFolder)
+    if (-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ Checked = $false; Clean = $true; Fixed = @() }
+    }
+    Push-Location $ConfigFolder
+    try {
+        & terraform fmt -check -list=true 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Checked = $true; Clean = $true; Fixed = @() } }
+        $fixed = @(& terraform fmt -list=true 2>&1 | Where-Object { $_ -match '\.tfvars?$' })
+        & terraform fmt -check 2>&1 | Out-Null
+        return [pscustomobject]@{ Checked = $true; Clean = ($LASTEXITCODE -eq 0); Fixed = $fixed }
+    }
+    catch {
+        return [pscustomobject]@{ Checked = $false; Clean = $true; Fixed = @() }
+    }
+    finally { Pop-Location }
+}
+
+Export-ModuleMember -Function Invoke-ALZInterview, Write-ALZInputsYaml, Set-ALZTfvarsRegion, Set-ALZTfvarsSubscriptionPlacement, Write-ALZStarterTfvars, Test-ALZTfvarsMatchesScenario, Write-ALZBicepConfig, Repair-ALZTfvarsFormat

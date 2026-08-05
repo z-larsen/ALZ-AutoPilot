@@ -59,6 +59,7 @@ The accelerator's documented requirement to review the platform configuration be
 | A closed terminal means spelunking through `output/` | State saved after every step; re-run resumes automatically |
 | Hand-edit `inputs.yaml` and dodge `${starter_location_01}` token traps | Config generated from your answers |
 | Cryptic failures (RP timeout, SSO, backend-config, TF_TOKEN, missing Workflows/Members scope) | Known failures matched to plain-language remediation |
+| An unformatted config fails `terraform fmt -check` in CI, blocking every future pull request | The generated config is fmt-checked and corrected before the bootstrap |
 | "Bootstrap succeeded" but the repos are empty | Post-bootstrap check verifies the repos actually received the workflows |
 | PAT pasted into notes/files | Token entered masked, used in-memory only, never written to disk |
 | Manual pipeline click-through + guessing the approval gate | Discovers the repo, triggers + watches the run, detects the apply gate, verifies MGs + policies |
@@ -112,6 +113,7 @@ ALZAutoPilot/
     ALZConfig.psm1          # interview + config generation
     ALZOrchestrator.psm1    # Deploy-Accelerator wrapper + error translation
     ALZPipeline.psm1        # pipeline trigger/watch/verify + HCP readiness checks
+    ALZReport.psm1          # HTML delivery report
   data/
     providers.json          # ALZ-recommended resource providers
     scenarios.json          # Terraform scenario catalog
@@ -124,6 +126,8 @@ ALZAutoPilot/
     Test-ALZConfigConformance.ps1   # offline: generated config vs the accelerator schema
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
+
+Each run writes `<delivery>\reports\alz-delivery-<timestamp>.html`: target state, subscriptions, what deployed, the last pipeline result, per-phase timings. One self-contained file with no external references, so it opens offline, emails cleanly, and prints for a closeout deck. The console keeps a short summary and points at it. The report contains no credentials, and every value is HTML-encoded.
 
 ## Tests
 
