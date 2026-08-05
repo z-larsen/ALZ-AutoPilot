@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.6.3-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.6.4-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -152,12 +152,6 @@ ALZAutoPilot/
   CHANGELOG.md              # version history
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
-
-## Versioning
-
-[Semantic versioning](https://semver.org/): MAJOR for breaking changes, MINOR for new capability, PATCH for fixes and documentation. History is in [CHANGELOG.md](CHANGELOG.md).
-
-The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so a report can always be traced back to the build that produced it. Bump it and add a changelog entry with each change.
 
 ## Delivery report
 

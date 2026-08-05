@@ -7,6 +7,10 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.6.4
+
+- Removed the Versioning section from the README. The version badge links to this file, which already explains the scheme.
+
 ## 1.6.3
 
 - README now embeds **screenshots** of the delivery report instead of linking the raw HTML, because GitHub does not render committed HTML inline and the file downloaded rather than displayed. The generator remains for regenerating them.
