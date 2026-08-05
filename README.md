@@ -70,6 +70,26 @@ The accelerator's documented requirement to review the platform configuration be
 
 The accelerator ties its approval gate and Azure-auth config to GitHub **environments**, which on a **free org only work on public repos** - so a free org gets **public** repos (fine for a rehearsal; nothing sensitive is exposed). A **Team/Enterprise/EMU** org gets **private** repos with the gate intact. The app works with both and warns you in preflight when the org is free.
 
+### Public repos and self-hosted runners
+
+If you take the free org **and** enable self-hosted runners for private networking, the runners execute inside your VNet with private-endpoint access to the Terraform state, on a repo anyone can fork. GitHub advises against that pairing:
+
+> We recommend that you only use self-hosted runners with private repositories. This is because forks of your public repository can potentially run dangerous code on your self-hosted runner machine by creating a pull request that executes the code in a workflow.
+
+Preflight warns when it detects both. Mitigate by setting Settings > Actions > **"Require approval for all external contributors"**, or remove the exposure entirely with a paid org and private repos.
+
+### Moving to private repos later
+
+Repos start public on a free org. To convert them afterwards:
+
+1. **Upgrade the org to Team first.** Private repos are free, but *environments* on private repos are not. Converting while still on Free silently ignores protection rules, and because the federated credential subjects are environment-scoped (`...:environment:alz-mgmt-apply:...`), Azure then rejects the OIDC token and the pipeline fails to authenticate. The symptom is `AADSTS700213`, which looks nothing like a billing problem.
+2. **Convert the module repo (`<name>`) to private.** A private caller can still call a public reusable workflow, so nothing breaks yet.
+3. **Convert the templates repo (`<name>-templates`) to private.**
+4. **Set its Actions access policy immediately**: templates repo > Settings > Actions > **General** > *Access* > "Accessible from repositories in the organization". Without it the caller cannot resolve the reusable workflow, and the error does not look like a permissions problem.
+5. **Verify**: run `02 Continuous Delivery` and confirm it plans, reaches the approval gate, and applies.
+
+Simpler alternative: leave the **templates** repo public. A private caller calling a public reusable workflow needs no access policy, and that repo holds workflow logic rather than your tenant identifiers.
+
 ## Requirements
 
 - PowerShell 7.4+

@@ -23,6 +23,30 @@ It does not replace the accelerator. It calls the same `Deploy-Accelerator` cmdl
 
 The ALZ PowerShell module is installed for you if it is missing.
 
+## Repo visibility and self-hosted runners
+
+On a **free** GitHub org the accelerator's repos are created **public**, because environments (which the approval gate and the Azure OIDC config depend on) only work on public repos under GitHub Free.
+
+If you also enable **self-hosted runners** for private networking, be aware of the combination: the runners execute inside your VNet, with private-endpoint access to the Terraform state, on a repository anyone can fork. GitHub's guidance:
+
+> We recommend that you only use self-hosted runners with private repositories. This is because forks of your public repository can potentially run dangerous code on your self-hosted runner machine by creating a pull request that executes the code in a workflow.
+
+Preflight warns when it sees both. Mitigations, in order of strength:
+
+1. Paid org with private repos, which removes the exposure.
+2. Do not use self-hosted runners, so a hostile fork PR at worst runs on GitHub-hosted ephemeral VMs.
+3. Settings > Actions > **"Require approval for all external contributors"**. Note the default, *first-time contributors*, stops applying to anyone who has ever had a PR merged.
+
+### Converting to private repos later
+
+1. **Upgrade the org to Team first.** Private repos are free; environments on private repos are not. Convert while still on Free and protection rules are silently ignored, which strips the `environment:` claim from the OIDC token and breaks Azure authentication with `AADSTS700213`.
+2. Convert the **module** repo to private. A private caller can still call a public reusable workflow, so nothing breaks yet.
+3. Convert the **templates** repo to private.
+4. Immediately set templates repo > Settings > Actions > **General** > *Access* > "Accessible from repositories in the organization". Without it the caller cannot resolve the reusable workflow.
+5. Run `02 Continuous Delivery` and confirm it plans, gates, and applies.
+
+Leaving the templates repo public is a valid shortcut: a private caller calling a public reusable workflow needs no access policy.
+
 ## Using HCP Terraform for state
 
 The accelerator has **no** HCP option: it always bootstraps an Azure Storage backend. Moving to HCP is therefore a post-bootstrap migration across both repos, and it is the step most likely to go wrong.

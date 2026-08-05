@@ -225,7 +225,8 @@ if ($runPreflight) {
                 $ghToken = ConvertTo-ALZPlainText -Secure $sec
             }
             Write-ALZStatus -Status RUN -Message 'Checking GitHub PAT, org access, and Members permission...'
-            $r = Test-ALZGitHubToken -Token $ghToken -Org $state.answers.githubOrg; Write-ALZResults $r; $results += $r
+            $r = Test-ALZGitHubToken -Token $ghToken -Org $state.answers.githubOrg -SelfHostedRunners ([bool]$state.answers.selfHostedRunners)
+            Write-ALZResults $r; $results += $r
             $ghToken = $null
         }
 

@@ -171,7 +171,7 @@ function Register-ALZResourceProviders {
 }
 
 function Test-ALZGitHubToken {
-    param([string]$Token, [string]$Org)
+    param([string]$Token, [string]$Org, [bool]$SelfHostedRunners)
     if (-not $Token) {
         return New-ALZCheckResult 'GitHub PAT' 'WARN' 'No token provided this session' 'The PAT is only needed for bootstrap. You will be prompted (masked) before the bootstrap runs.'
     }
@@ -189,6 +189,12 @@ function Test-ALZGitHubToken {
         $planName = if ($orgInfo.plan) { $orgInfo.plan.name } else { 'unknown' }
         if ($planName -eq 'free') {
             $results += New-ALZCheckResult "GitHub org: $Org" 'WARN' "Reachable (free plan)" 'A free org makes the accelerator repos public. Fine for a rehearsal; use a paid/EMU org for anything real.' 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
+            # A free org forces public repos, and self-hosted runners then execute inside the
+            # VNet that reaches the state storage. GitHub advises against that pairing because
+            # a fork pull request can run code on the runner.
+            if ($SelfHostedRunners) {
+                $results += New-ALZCheckResult 'Public repos + self-hosted runners' 'WARN' 'A free org makes the repos public, and self-hosted runners run inside your VNet' 'GitHub recommends self-hosted runners only on private repositories, because a fork pull request can run code on the runner, which here has private-endpoint access to the Terraform state. Mitigate by setting Settings > Actions > "Require approval for all external contributors", or remove the exposure with a paid org and private repos, or by not using self-hosted runners.' 'https://docs.github.com/en/actions/reference/security/secure-use'
+            }
         }
         else {
             $results += New-ALZCheckResult "GitHub org: $Org" 'OK' "Reachable (plan: $planName)"
