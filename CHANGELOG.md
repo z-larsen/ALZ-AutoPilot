@@ -7,6 +7,10 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.6.2
+
+- The sample report is now published in the repo, and the generator scrubs its own scratch path (which carried the local username) before writing. It refuses to produce a file that still contains the username, `AppData`, or `OneDrive`.
+
 ## 1.6.1
 
 - Added `scripts/New-SampleReport.ps1`, which renders a fully populated delivery report from fictional data (Contoso names, throwaway GUIDs, a representative slice of the ALZ baseline) for screenshots and documentation. It reads the version from its single source rather than hardcoding one.

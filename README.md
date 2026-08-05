@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.6.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.6.2-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -164,6 +164,8 @@ The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.p
 Every run writes `<delivery>\reports\alz-delivery-<timestamp>.html`. The console keeps a short summary and points at it, so the detail lives in a file you can share rather than scrolling past.
 
 One self-contained file with inline CSS and no external references: it opens offline, emails cleanly, and prints for a closeout deck. It contains no credentials, and every value is HTML-encoded.
+
+A published example is in [sample-delivery-report.html](sample-delivery-report.html), rendered entirely from fictional data. Regenerate it with `scripts/New-SampleReport.ps1`.
 
 What is in it:
 

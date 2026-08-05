@@ -146,8 +146,20 @@ $generated = New-ALZDeliveryReport -State $state -Platform $platform -Run $run `
     -ResourceGroups $rgs -Repo $repo -SessionStart (Get-Date).AddMinutes(-46) -AppVersion $appVersion
 
 if (-not $OutputPath) { $OutputPath = Join-Path $repoRoot 'sample-delivery-report.html' }
-Copy-Item -LiteralPath $generated -Destination $OutputPath -Force
+
+# The report renders its own delivery path, which is the real scratch folder and so
+# carries the local username. Swap it for a fictional one before publishing.
+$html = Get-Content -LiteralPath $generated -Raw
+$html = $html.Replace([System.Net.WebUtility]::HtmlEncode($scratch), 'D:\ALZ\Contoso Ltd')
+[System.IO.File]::WriteAllText($OutputPath, $html)
 Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+
+# Fail loudly rather than publishing a sample that leaks the local environment.
+foreach ($leak in @($env:USERNAME, 'AppData', 'OneDrive')) {
+    if ($leak -and $html -match [regex]::Escape($leak)) {
+        throw "Sample report still contains '$leak'. Not writing a publishable file."
+    }
+}
 
 Write-Host "Sample report written to: $OutputPath" -ForegroundColor Green
 Write-Host "  v$appVersion, $($assignments.Count) policy assignments across $(($assignments | Group-Object ManagementGroup).Count) management groups" -ForegroundColor DarkGray
