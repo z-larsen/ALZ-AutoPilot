@@ -56,6 +56,12 @@ function New-ALZDeliveryReport {
     if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $path = Join-Path $reportDir "alz-delivery-$stamp.html"
+    # Two reports inside the same second would otherwise overwrite each other.
+    $n = 2
+    while (Test-Path $path) {
+        $path = Join-Path $reportDir "alz-delivery-$stamp-$n.html"
+        $n++
+    }
 
     $failed = @($script:ReportPhaseOrder | Where-Object { $State.phaseStatus.$_ -eq 'failed' }).Count
     $pending = @($script:ReportPhaseOrder | Where-Object { $State.phaseStatus.$_ -eq 'pending' }).Count
@@ -131,6 +137,65 @@ function New-ALZDeliveryReport {
 "@
     }
 
+    # --- Policy baseline --------------------------------------------------
+    # Read from the data Test-ALZPlatformDeployed already gathered, so this costs
+    # no extra calls. Assignments only exist after the platform pipeline has run,
+    # so an empty set means "not deployed yet" rather than "something went wrong".
+    $policySection = ''
+    $assignments = @()
+    if ($Platform -and $Platform.PSObject.Properties.Name -contains 'Assignments') { $assignments = @($Platform.Assignments) }
+
+    $policyIntro = @'
+<p class="note">These come from the Azure Landing Zones policy baseline, Microsoft's recommended
+starting point. You are not expected to have chosen them. Most are <strong>Audit</strong> or
+<strong>DeployIfNotExists</strong>, which report on or remediate resources rather than blocking
+them, so the baseline is safe to run first and tune later. Changing any of it is a day-2 edit to
+the platform config in the module repo, reviewed as a pull request and applied through the same
+approval gate.</p>
+'@
+
+    if ($assignments.Count -eq 0) {
+        $policySection = @"
+<h2>Policy baseline</h2>
+$policyIntro
+<p class="note"><strong>Nothing assigned yet.</strong> Policy is deployed by the
+&quot;02 Continuous Delivery&quot; pipeline, not by the bootstrap. Run the pipeline, then re-run
+ALZ Autopilot to produce a report with the full inventory.</p>
+"@
+    }
+    else {
+        $initiatives = @($assignments | Where-Object { $_.IsInitiative }).Count
+        $enforced = @($assignments | Where-Object { $_.EnforcementMode -eq 'Default' }).Count
+        $auditOnly = $assignments.Count - $enforced
+
+        $byMg = $assignments | Group-Object ManagementGroup | Sort-Object Count -Descending
+        $mgRows = ($byMg | ForEach-Object {
+                $init = @($_.Group | Where-Object { $_.IsInitiative }).Count
+                "<tr><td><code>$(& $e $_.Name)</code></td><td class='num'>$($_.Count)</td><td class='num'>$init</td></tr>"
+            }) -join "`n"
+
+        $policySection = @"
+<h2>Policy baseline</h2>
+$policyIntro
+<table>
+<tr><th>Assignments</th><td><span class="metric">$($assignments.Count)</span></td></tr>
+<tr><th>Initiatives (policy sets)</th><td>$initiatives</td></tr>
+<tr><th>Single policies</th><td>$($assignments.Count - $initiatives)</td></tr>
+<tr><th>Enforced</th><td>$enforced</td></tr>
+<tr><th>Audit only (DoNotEnforce)</th><td>$auditOnly</td></tr>
+</table>
+<h3>Where they are assigned</h3>
+<table>
+<tr><th style="width:auto">Management group</th><th class="num" style="width:120px">Assignments</th><th class="num" style="width:110px">Initiatives</th></tr>
+$mgRows
+</table>
+<p class="note">Assignments inherit down the hierarchy, so a subscription under
+<code>corp</code> also gets everything assigned at <code>landingzones</code> and <code>alz</code>.
+Full catalogue:
+<a href="https://azure.github.io/Azure-Landing-Zones/policy/">Azure Landing Zones policy documentation</a>.</p>
+"@
+    }
+
     # --- Phases -----------------------------------------------------------
     $phaseRows = @()
     foreach ($p in $script:ReportPhaseOrder) {
@@ -176,6 +241,8 @@ function New-ALZDeliveryReport {
   .wrap { max-width:900px; margin:0 auto; background:#fff; border:1px solid var(--line); border-radius:10px; padding:32px 36px; }
   h1 { margin:0 0 4px; font-size:22px; }
   h2 { margin:32px 0 10px; font-size:15px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); border-bottom:1px solid var(--line); padding-bottom:6px; }
+  h3 { margin:22px 0 6px; font-size:14px; color:var(--ink); }
+  p.note { margin:10px 0 14px; font-size:13.5px; color:#3d4650; background:#f7f9fb; border-left:3px solid var(--accent); padding:10px 14px; border-radius:0 5px 5px 0; }
   .sub { color:var(--dim); font-size:13px; margin-bottom:18px; }
   table { width:100%; border-collapse:collapse; }
   th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; font-size:14px; }
@@ -223,6 +290,8 @@ $deployedRows
   </table>
 
 $runSection
+
+$policySection
 
   <h2>Phases</h2>
   <table>

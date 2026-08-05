@@ -283,17 +283,28 @@ function Test-ALZPlatformDeployed {
     # Assignments must be counted one management group at a time. At management group
     # scope the service rejects atScopeAndBelow(), which is what --disable-scope-strict-match
     # sends, and returns UnsupportedFilter; atScope() per group is the supported form.
-    $ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $seen = @{}
     foreach ($name in $mgNames) {
         try {
             $pa = az policy assignment list --scope "/providers/Microsoft.Management/managementGroups/$name" -o json 2>$null | ConvertFrom-Json
-            foreach ($p in @($pa)) { if ($p.id) { [void]$ids.Add([string]$p.id) } }
+            foreach ($p in @($pa)) {
+                if (-not $p.id -or $seen.ContainsKey($p.id)) { continue }
+                $seen[$p.id] = [pscustomobject]@{
+                    Name            = $p.name
+                    DisplayName     = $p.displayName
+                    ManagementGroup = ($p.scope -split '/')[-1]
+                    IsInitiative    = ([string]$p.policyDefinitionId -like '*policySetDefinitions*')
+                    EnforcementMode = $(if ($p.enforcementMode) { $p.enforcementMode } else { 'Default' })
+                }
+            }
         }
         catch { }
     }
+    $assignments = @($seen.Values)
     return [pscustomobject]@{
         ManagementGroups  = $mgCount
-        PolicyAssignments = $ids.Count
+        PolicyAssignments = $assignments.Count
+        Assignments       = $assignments
     }
 }
 
