@@ -5,6 +5,10 @@
 
 # ALZ Autopilot
 
+[![Version](https://img.shields.io/badge/version-1.6.0-blue)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
+
 Guided automation for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). It does not change what the accelerator does. It's a guided orchestration layer that reduces process overhead without removing the accelerator's review, approval, and deployment boundaries.
 
 One entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
@@ -145,8 +149,15 @@ ALZAutoPilot/
     lib-pci/                # custom library example: regulated MG + PCI/HIPAA
   tests/
     Test-ALZConfigConformance.ps1   # offline: generated config vs the accelerator schema
+  CHANGELOG.md              # version history
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
+
+## Versioning
+
+[Semantic versioning](https://semver.org/): MAJOR for breaking changes, MINOR for new capability, PATCH for fixes and documentation. History is in [CHANGELOG.md](CHANGELOG.md).
+
+The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so a report can always be traced back to the build that produced it. Bump it and add a changelog entry with each change.
 
 ## Delivery report
 

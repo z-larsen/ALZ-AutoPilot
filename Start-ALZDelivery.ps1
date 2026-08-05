@@ -46,6 +46,11 @@ $root = $PSScriptRoot
 $dataPath = Join-Path $root 'data'
 $modulePath = Join-Path $root 'modules'
 
+# Single source of truth for the app version. Shown on the splash and stamped into
+# every delivery report, so an artifact can be traced back to the build. Bump it and
+# add a CHANGELOG.md entry with each change.
+$ALZVersion = '1.6.0'
+
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZState.psm1') -Force
@@ -56,7 +61,7 @@ Import-Module (Join-Path $modulePath 'ALZPipeline.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZReport.psm1') -Force
 
 if (-not $NoClear) { try { Clear-Host } catch { } }
-Write-ALZSplash -Version '1.0.0'
+Write-ALZSplash -Version $ALZVersion
 
 $sessionStart = Get-Date
 # Collected through the run and rendered in the closing summary.
@@ -563,7 +568,7 @@ if (-not $summaryPlatform) {
 }
 Save-ALZState -State $state
 $reportPath = $null
-try { $reportPath = New-ALZDeliveryReport -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -DataPath $dataPath }
+try { $reportPath = New-ALZDeliveryReport -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -DataPath $dataPath -AppVersion $ALZVersion }
 catch { Write-ALZStatus -Status WARN -Message 'Could not write the HTML report.' -Detail $_.Exception.Message }
 Write-ALZSummary -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -ReportPath $reportPath
 

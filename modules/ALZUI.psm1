@@ -58,7 +58,7 @@ function Format-ALZDuration {
 }
 
 function Write-ALZSplash {
-    param([string]$Version = '1.0.0')
+    param([string]$Version)
     $line = '=' * (Get-ALZRuleWidth)
     Write-Host ''
     Write-Host "  $line" -ForegroundColor DarkCyan
@@ -74,7 +74,7 @@ function Write-ALZSplash {
     Write-Host '   A U T O P I L O T' -ForegroundColor White
     Write-Host ''
     Write-Host '   Guided automation for the Azure Landing Zone Accelerator' -ForegroundColor Gray
-    Write-Host "   Version $Version" -ForegroundColor DarkGray
+    if ($Version) { Write-Host "   Version $Version" -ForegroundColor DarkGray }
     Write-Host ''
     Write-Host "  $line" -ForegroundColor DarkCyan
     Write-Host ''
