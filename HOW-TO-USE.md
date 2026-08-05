@@ -127,6 +127,8 @@ No hand-editing, and no chance of the classic mistake of replacing a `${starter_
 
 The file is then yours to edit. On a re-run the app patches only the values the interview owns, so your edits survive. If you change scenario, it detects the mismatch and asks before replacing.
 
+The config is also checked with `terraform fmt`. The accelerator's CI workflow runs `terraform fmt -check` and fails the build on unformatted files, which would block every future pull request, so anything off is corrected here. Formatting is whitespace-only, so it cannot change behaviour.
+
 **Custom library**: if a `config/lib` folder exists (custom management groups, archetypes, policy definitions or assignments), it is detected and passed to the accelerator automatically. See [samples/lib-pci](samples/lib-pci/README.md) for a worked PCI DSS and HIPAA example.
 
 ### 4. Bootstrap
@@ -144,9 +146,15 @@ Two options:
 1. **Guided in the CLI**: discovers the repo, triggers the workflow, watches the run with a heartbeat, waits through the approval gate, and verifies the result.
 2. **Manual**: prints a step-by-step runbook so you can drive the GitHub UI yourself. Useful when a customer should watch the plan, gate, and apply happen.
 
-### 6. Summary
+### 6. Summary and report
 
-Every session ends with a summary: target configuration, what was deployed (repo, workflow, resource groups by name, management group and policy assignment counts), the last pipeline result, per-phase progress, and stats including session duration and delivery age.
+The console prints a short summary: delivery, topology, module repo, management group and policy counts, phases complete, and session time.
+
+The detail goes to `<delivery>\reports\alz-delivery-<timestamp>.html`, and you are offered the chance to open it. It covers target state, subscriptions, what deployed, the last pipeline result, per-phase timings, and a **policy baseline** section explaining what the policy set is, how much of it is enforced versus audit-only, and the exact assignment names you would need to change any of it.
+
+One self-contained file, no external references, no credentials. It prints for a closeout deck.
+
+If you stop after the bootstrap, the policy section will say nothing is assigned yet, because policy deploys from the pipeline. Re-run after the pipeline completes to get the full inventory.
 
 ---
 
@@ -208,6 +216,7 @@ The app matches failures against a catalog of known signatures and prints the fi
 | `409 Changes must be made through a pull request` | Re-bootstrapping with changed config against repos that already have branch protection. Prefer a fresh bootstrap with the final config |
 | `All subscription ids must be valid UUIDs` | A blank or repeated subscription. Note `subscription_placement` appears in **two** files: `terraform.tfvars.json` and `platform-landing-zone.auto.tfvars`. Both must agree |
 | Plan log full of `PolicyRoleAssignmentError ... id cannot be empty` | A known alzlib limitation surfaced as a **warning**, not the failure. Look above it for the real `Error:` line |
+| `01 Continuous Integration` fails with exit code 3 on a pull request | `terraform fmt -check` found an unformatted file, usually after hand-editing the config in the web UI. Run `terraform fmt` on the module repo and commit. Until it is fixed, every pull request fails |
 
 ## What is not supported
 
@@ -217,6 +226,23 @@ The app matches failures against a catalog of known signatures and prints the fi
 | Azure DevOps stage 2 | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only today, so Azure DevOps prints the runbook instead |
 | `bicep-classic` | The accelerator accepts it; this app offers Terraform and Bicep only |
 | Automatic editing of your repos | The HCP migration is verified, not applied. Editing a customer's IaC blind is riskier than checking it |
+| Brownfield tenants | The tool is greenfield-first, see the caution below |
+
+## Brownfield tenants
+
+If the target tenant already has management groups, or the platform subscriptions already contain workloads, read this before running.
+
+The app offers a parent management group so the hierarchy can nest under an existing one, which matches Microsoft's documented transition pattern. Beyond that it does not accommodate an existing estate:
+
+- Preflight does not check for management group names that collide with the ALZ ones.
+- `update_existing` is not exposed, so an existing hierarchy is not adopted.
+- Nothing warns that subscription placement **moves live subscriptions** into a new policy scope.
+
+The risk is the policy baseline. Against empty subscriptions it applies to nothing. Against a populated tenant, every enforced assignment applies to running workloads on the first apply: `DeployIfNotExists` assignments begin remediating existing resources, and any `Deny` starts blocking deployments for application teams.
+
+Microsoft's guidance is to duplicate the landing zone management group with policies in **audit only** mode, assess compliance, and move subscriptions in once they are ready. See [Transition an environment by duplicating a landing zone management group](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only).
+
+Rehearse in a clean tenant first.
 
 Full run transcripts are written to `%TEMP%\alz-bootstrap-<timestamp>.log` with tokens redacted.
 

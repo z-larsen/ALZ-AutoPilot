@@ -95,10 +95,10 @@ Re-running the same command resumes from wherever you left off.
 ## Flow
 
 ```
-Plan (interview) -> Prerequisites -> Generate config -> Bootstrap -> [HCP state] -> Deploy platform -> Summary
+Plan (interview) -> Prerequisites -> Generate config -> Bootstrap -> [HCP state] -> Deploy platform -> Report
 ```
 
-Plan, Prerequisites, Generate config, and Bootstrap are fully automated. The platform deployment can be driven from the CLI (trigger, watch, approve, verify) or printed as a manual runbook so a customer can watch it happen in GitHub. When HCP is selected, the migration steps are printed and then **verified** against the repos before the pipeline runs.
+Plan, Prerequisites, Generate config, and Bootstrap are fully automated. The platform deployment can be driven from the CLI (trigger, watch, approve, verify) or printed as a manual runbook so a customer can watch it happen in GitHub. When HCP is selected, the migration steps are printed and then **verified** against the repos before the pipeline runs. Every run ends with an HTML report in the delivery folder.
 
 ## Layout
 
@@ -127,7 +127,33 @@ ALZAutoPilot/
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
 
-Each run writes `<delivery>\reports\alz-delivery-<timestamp>.html`: target state, subscriptions, what deployed, the last pipeline result, per-phase timings. One self-contained file with no external references, so it opens offline, emails cleanly, and prints for a closeout deck. The console keeps a short summary and points at it. The report contains no credentials, and every value is HTML-encoded.
+## Delivery report
+
+Every run writes `<delivery>\reports\alz-delivery-<timestamp>.html`. The console keeps a short summary and points at it, so the detail lives in a file you can share rather than scrolling past.
+
+One self-contained file with inline CSS and no external references: it opens offline, emails cleanly, and prints for a closeout deck. It contains no credentials, and every value is HTML-encoded.
+
+What is in it:
+
+| Section | Contents |
+|---|---|
+| Target | Region, topology, version control, state backend, runners, approvers |
+| Platform subscriptions | Each role, or "not supplied" where you skipped one |
+| Deployed | Module repo, management group and policy counts, resource groups |
+| Policy baseline | What the baseline is, counts by type and enforcement, per management group, and the exact assignment names |
+| Phases | Status and duration for each phase |
+| Session | Run counts, delivery age, folder |
+
+### The policy baseline section
+
+This exists because the most common question after a first deployment is "what did I just deploy, and how would I know what is normal?" It answers that from your tenant rather than from documentation:
+
+- Totals: assignments, initiatives, single policies, enforced vs audit-only.
+- A per management group breakdown, with a reminder that assignments inherit downward.
+- **The exact assignment names**, collapsed per management group. The ALZ library version-stamps these (`Deploy-MDFC-Config-H224`), so they cannot be guessed or copied from a blog post. A snippet above them shows where the name goes in `policy_assignments_to_modify`.
+- Assignments at the tenant root are labelled **pre-existing**, because the accelerator only assigns at `alz` and below. Without that, policies that were already in the tenant get misread as something the accelerator deployed.
+
+Before the pipeline has run there are no assignments yet, so the section says so and tells you to re-run afterwards rather than showing a bare zero.
 
 ## Tests
 
@@ -174,6 +200,15 @@ If you pick a different Terraform scenario on a re-run, the tool notices the exi
 - **TLS enforced.** GitHub and HCP API calls use HTTPS with default certificate validation (no `-SkipCertificateCheck`).
 - **No dynamic code execution.** No `Invoke-Expression`, no remote code download. Every Azure CLI argument is a validated GUID or an app constant.
 - **Requires PowerShell 7.4+** and refuses to run under Windows PowerShell 5.1.
+
+## Known limitations
+
+| Limitation | Detail |
+|---|---|
+| **Brownfield tenants** | The tool is greenfield-first. It offers a parent management group so the hierarchy can nest under an existing one, but preflight does not check for colliding management group names, `update_existing` is not exposed, and nothing warns that subscription placement moves live subscriptions into policy scope. In a populated tenant the policy baseline applies to running workloads on the first apply. Follow Microsoft's [audit-only transition guidance](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only) before pointing this at production |
+| **Azure DevOps stage 2** | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only |
+| **Local file system VCS** | Not supported. Use the accelerator directly |
+| **`bicep-classic`** | Not exposed. Terraform and Bicep only |
 
 ## Scope and roadmap
 
