@@ -272,20 +272,28 @@ function Test-ALZPlatformDeployed {
     # Count in PowerShell rather than with az --query "length(@)": on Windows the
     # az.cmd wrapper mangles the @ and () through cmd.exe and returns garbage.
     $mgCount = 0
+    $mgNames = @()
     try {
         $mgs = az account management-group list -o json 2>$null | ConvertFrom-Json
         $mgCount = @($mgs).Count
+        $mgNames = @($mgs | ForEach-Object { $_.name } | Where-Object { $_ })
     }
     catch { }
-    $policyCount = 0
-    try {
-        $pa = az policy assignment list --scope "/providers/Microsoft.Management/managementGroups/$RootMgName" --disable-scope-strict-match -o json 2>$null | ConvertFrom-Json
-        $policyCount = @($pa).Count
+
+    # Assignments must be counted one management group at a time. At management group
+    # scope the service rejects atScopeAndBelow(), which is what --disable-scope-strict-match
+    # sends, and returns UnsupportedFilter; atScope() per group is the supported form.
+    $ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $mgNames) {
+        try {
+            $pa = az policy assignment list --scope "/providers/Microsoft.Management/managementGroups/$name" -o json 2>$null | ConvertFrom-Json
+            foreach ($p in @($pa)) { if ($p.id) { [void]$ids.Add([string]$p.id) } }
+        }
+        catch { }
     }
-    catch { }
     return [pscustomobject]@{
         ManagementGroups  = $mgCount
-        PolicyAssignments = $policyCount
+        PolicyAssignments = $ids.Count
     }
 }
 

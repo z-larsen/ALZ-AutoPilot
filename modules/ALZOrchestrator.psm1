@@ -269,7 +269,8 @@ function Show-ALZManualSteps {
     Write-Host ''
     Write-Host '  Verify (portal Management groups, or):' -ForegroundColor DarkCyan
     Write-Host '   az account management-group list -o table' -ForegroundColor DarkCyan
-    Write-Host "   az policy assignment list --scope /providers/Microsoft.Management/managementGroups/alz --disable-scope-strict-match -o table" -ForegroundColor DarkCyan
+    Write-Host "   az policy assignment list --scope /providers/Microsoft.Management/managementGroups/alz -o table" -ForegroundColor DarkCyan
+    Write-Host '   (repeat per management group: at MG scope Azure rejects --disable-scope-strict-match)' -ForegroundColor DarkGray
 
     if ($a.stateBackend -eq 'hcp') {
         Write-Host ''
