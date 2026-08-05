@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.6.2-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.6.3-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -165,7 +165,9 @@ Every run writes `<delivery>\reports\alz-delivery-<timestamp>.html`. The console
 
 One self-contained file with inline CSS and no external references: it opens offline, emails cleanly, and prints for a closeout deck. It contains no credentials, and every value is HTML-encoded.
 
-A published example is in [sample-delivery-report.html](sample-delivery-report.html), rendered entirely from fictional data. Regenerate it with `scripts/New-SampleReport.ps1`.
+<p align="center">
+  <img src="assets/report-overview.png" alt="Delivery report: target, subscriptions, and what deployed" width="820">
+</p>
 
 What is in it:
 
@@ -187,7 +189,17 @@ This exists because the most common question after a first deployment is "what d
 - **The exact assignment names**, collapsed per management group. The ALZ library version-stamps these (`Deploy-MDFC-Config-H224`), so they cannot be guessed or copied from a blog post. A snippet above them shows where the name goes in `policy_assignments_to_modify`.
 - Assignments at the tenant root are labelled **pre-existing**, because the accelerator only assigns at `alz` and below. Without that, policies that were already in the tenant get misread as something the accelerator deployed.
 
+<p align="center">
+  <img src="assets/report-policy.png" alt="Policy baseline: counts by type and enforcement, and a per management group breakdown" width="820">
+</p>
+
+<p align="center">
+  <img src="assets/report-policy-names.png" alt="Assignment names per management group with the policy_assignments_to_modify snippet" width="820">
+</p>
+
 Before the pipeline has run there are no assignments yet, so the section says so and tells you to re-run afterwards rather than showing a bare zero.
+
+Screenshots above are rendered from fictional data by `scripts/New-SampleReport.ps1`.
 
 ## Tests
 
