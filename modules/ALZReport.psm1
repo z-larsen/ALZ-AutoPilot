@@ -167,12 +167,35 @@ ALZ Autopilot to produce a report with the full inventory.</p>
         $initiatives = @($assignments | Where-Object { $_.IsInitiative }).Count
         $enforced = @($assignments | Where-Object { $_.EnforcementMode -eq 'Default' }).Count
         $auditOnly = $assignments.Count - $enforced
+        # The accelerator assigns at 'alz' and below. A GUID-named group is the tenant root,
+        # so anything there pre-dates this deployment and is not part of the ALZ baseline.
+        $isOutside = { param($mg) $mg -match '^[0-9a-fA-F-]{36}$' }
+        $outside = @($assignments | Where-Object { & $isOutside $_.ManagementGroup }).Count
+        $outsideNote = if ($outside -gt 0) {
+            "<p class=`"note`"><strong>$outside of these were not created by the accelerator.</strong> They are assigned at the tenant root, above the ALZ hierarchy, so they already existed in this tenant. They are listed because they still apply to everything underneath, but changing them is outside the accelerator's config.</p>"
+        }
+        else { '' }
 
         $byMg = $assignments | Group-Object ManagementGroup | Sort-Object Count -Descending
         $mgRows = ($byMg | ForEach-Object {
                 $init = @($_.Group | Where-Object { $_.IsInitiative }).Count
-                "<tr><td><code>$(& $e $_.Name)</code></td><td class='num'>$($_.Count)</td><td class='num'>$init</td></tr>"
+                $label = if (& $isOutside $_.Name) { "<code>$(& $e $_.Name)</code> <span class='pill muted-pill'>tenant root, pre-existing</span>" } else { "<code>$(& $e $_.Name)</code>" }
+                "<tr><td>$label</td><td class='num'>$($_.Count)</td><td class='num'>$init</td></tr>"
             }) -join "`n"
+
+        # The exact assignment name is what has to be pasted into the config, and the ALZ
+        # library version-stamps them (Deploy-MDFC-Config-H224), so they cannot be guessed
+        # or copied from documentation. List them from what is actually in the tenant.
+        $nameBlocks = @()
+        foreach ($g in ($byMg | Sort-Object Name)) {
+            $items = @()
+            foreach ($asn in ($g.Group | Sort-Object Name)) {
+                $badge = if ($asn.EnforcementMode -ne 'Default') { " <span class='pill muted-pill'>audit only</span>" } else { '' }
+                $items += "<li><code>$(& $e $asn.Name)</code>$badge</li>"
+            }
+            $nameBlocks += "<details><summary><code>$(& $e $g.Name)</code> &middot; $($g.Count) assignments$(if (& $isOutside $g.Name) { ' <span class=""pill muted-pill"">tenant root, pre-existing</span>' })</summary><ul class=""names"">$($items -join '')</ul></details>"
+        }
+        $nameBlocks = $nameBlocks -join "`n"
 
         $policySection = @"
 <h2>Policy baseline</h2>
@@ -184,6 +207,7 @@ $policyIntro
 <tr><th>Enforced</th><td>$enforced</td></tr>
 <tr><th>Audit only (DoNotEnforce)</th><td>$auditOnly</td></tr>
 </table>
+$outsideNote
 <h3>Where they are assigned</h3>
 <table>
 <tr><th style="width:auto">Management group</th><th class="num" style="width:120px">Assignments</th><th class="num" style="width:110px">Initiatives</th></tr>
@@ -193,6 +217,26 @@ $mgRows
 <code>corp</code> also gets everything assigned at <code>landingzones</code> and <code>alz</code>.
 Full catalogue:
 <a href="https://azure.github.io/Azure-Landing-Zones/policy/">Azure Landing Zones policy documentation</a>.</p>
+
+<h3>Assignment names, for changing one</h3>
+<p class="note">Changing an assignment means naming it exactly. The ALZ library version-stamps
+these names, for example <code>Deploy-MDFC-Config-H224</code>, so copy from this list rather than
+from documentation or a blog post. Edit <code>platform-landing-zone.auto.tfvars</code> in the
+module repo, keyed by the management group it is assigned at, then open a pull request. The change
+goes through the same plan, approval, and apply as everything else.</p>
+<pre>policy_assignments_to_modify = {
+  alz = {                                  # the management group below
+    policy_assignments = {
+      &lt;assignment-name&gt; = {                # copied from this list
+        enforcement_mode = "DoNotEnforce"   # stop it acting, keep the compliance signal
+        # parameters     = { ... }          # change its settings
+        # not_scopes     = [ ... ]          # exempt one scope
+        # creation_enabled = false          # remove it (small scale only, see docs)
+      }
+    }
+  }
+}</pre>
+$nameBlocks
 "@
     }
 
@@ -258,6 +302,11 @@ Full catalogue:
   .metric { font-size:17px; font-weight:600; color:var(--accent); }
   ul.tight { margin:0; padding-left:18px; }
   ul.tight li { margin:1px 0; }
+  details { margin:5px 0; border:1px solid var(--line); border-radius:6px; padding:7px 11px; background:#fcfdfe; }
+  summary { cursor:pointer; font-size:13.5px; }
+  ul.names { columns:2; column-gap:26px; margin:9px 0 3px; padding-left:18px; font-size:12.5px; }
+  ul.names li { margin:2px 0; break-inside:avoid; }
+  pre { background:#f7f9fb; border:1px solid var(--line); border-radius:6px; padding:12px 14px; font:12.5px ui-monospace,Consolas,monospace; overflow-x:auto; }
   a { color:var(--accent); }
   .banner { display:flex; justify-content:space-between; align-items:center; gap:16px; }
   footer { margin-top:28px; padding-top:14px; border-top:1px solid var(--line); font-size:12px; color:var(--dim); }
