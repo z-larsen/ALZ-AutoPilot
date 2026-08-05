@@ -26,6 +26,10 @@ platform-landing-zone.tfvars
 *.log
 alz-bootstrap-*.log
 
+# Regenerate with scripts/New-SampleReport.ps1 rather than committing the output
+sample-delivery-report.html
+reports/
+
 # Secrets
 .env
 *.key

@@ -49,7 +49,7 @@ $modulePath = Join-Path $root 'modules'
 # Single source of truth for the app version. Shown on the splash and stamped into
 # every delivery report, so an artifact can be traced back to the build. Bump it and
 # add a CHANGELOG.md entry with each change.
-$ALZVersion = '1.6.0'
+$ALZVersion = '1.6.1'
 
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force

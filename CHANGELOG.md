@@ -7,6 +7,10 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.6.1
+
+- Added `scripts/New-SampleReport.ps1`, which renders a fully populated delivery report from fictional data (Contoso names, throwaway GUIDs, a representative slice of the ALZ baseline) for screenshots and documentation. It reads the version from its single source rather than hardcoding one.
+
 ## 1.6.0
 
 - Preflight warns when a **free GitHub org is combined with self-hosted runners**. That pairing puts VNet-resident runners, which have private-endpoint access to the Terraform state, on a repository anyone can fork. GitHub advises against it, and the tool previously steered users into it without comment.
