@@ -249,6 +249,100 @@ function Test-ALZAdoToken {
     return $results
 }
 
+# The management group names the accelerator creates. A collision means the target
+# tenant already has a hierarchy, which the accelerator does not adopt by default.
+$script:ALZManagementGroupNames = @('alz', 'platform', 'connectivity', 'identity', 'management', 'security', 'landingzones', 'corp', 'online', 'local', 'sandbox', 'decommissioned')
+
+# Resource groups Azure creates on its own. Their presence says nothing about whether
+# a subscription is in use, so they must not trigger a brownfield warning.
+$script:ALZIgnorableResourceGroups = @('NetworkWatcherRG', 'Default-ActivityLogAlerts', 'LogAnalyticsDefaultResources', 'DefaultResourceGroup-*', 'cloud-shell-storage-*', 'microsoft-network', 'AzureBackupRG_*', 'databricks-rg-*')
+
+function Test-ALZExistingEstate {
+    param([hashtable]$Subscriptions, [string]$ParentManagementGroupId)
+    $doc = 'https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only'
+    $root = $ParentManagementGroupId
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        try { $root = (az account show -o json 2>$null | ConvertFrom-Json).tenantId } catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        return @(New-ALZCheckResult 'Existing estate' 'WARN' 'Could not resolve the root management group' 'Sign in with az login and re-run, or the brownfield checks are skipped.' $doc)
+    }
+
+    # One descendants call returns every management group and placed subscription
+    # beneath the root, each with its parent.
+    try {
+        $url = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$([uri]::EscapeDataString($root))/descendants?api-version=2021-04-01"
+        $resp = az rest --method get --url $url -o json 2>$null | ConvertFrom-Json
+        $entities = @($resp.value)
+    }
+    catch {
+        return @(New-ALZCheckResult 'Existing estate' 'WARN' 'Could not read the management group hierarchy' 'Advisory check only. Confirm manually whether the tenant already has an ALZ hierarchy.' $doc)
+    }
+
+    $results = @()
+    $existingMgs = @($entities | Where-Object { $_.type -eq 'Microsoft.Management/managementGroups' } | ForEach-Object { $_.name })
+    $collisions = @($existingMgs | Where-Object { $_ -in $script:ALZManagementGroupNames })
+
+    if ($collisions.Count -eq 0) {
+        $results += New-ALZCheckResult 'Existing management groups' 'OK' "None of the ALZ management group names exist yet ($($existingMgs.Count) other group(s) present)"
+    }
+    elseif ($collisions.Count -ge 10) {
+        $results += New-ALZCheckResult 'Existing management groups' 'OK' "An ALZ hierarchy is already present ($($collisions.Count) of the expected groups)" 'This looks like a re-run against an existing deployment rather than a new tenant.'
+    }
+    else {
+        $results += New-ALZCheckResult 'Existing management groups' 'WARN' "$($collisions.Count) ALZ management group name(s) already exist: $($collisions -join ', ')" "The accelerator does not adopt existing management groups by default (update_existing defaults to false, and this app does not expose it). Either remove them, deploy under a different parent management group, or plan the transition deliberately." $doc
+    }
+
+    # A subscription already sitting under a management group is being moved, not placed.
+    # That changes which policies apply to whatever is running in it.
+    $placed = @($entities | Where-Object { $_.type -eq 'Microsoft.Management/managementGroups/subscriptions' })
+    $moving = @()
+    foreach ($role in @('management', 'connectivity', 'identity', 'security')) {
+        $id = $Subscriptions.$role
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        $entry = $placed | Where-Object { $_.name -eq $id } | Select-Object -First 1
+        if (-not $entry) { continue }
+        $parent = ($entry.properties.parent.id -replace '.*/', '')
+        if ($parent -and $parent -ne $root -and $parent -notin $script:ALZManagementGroupNames) {
+            $moving += "$role -> currently under '$parent'"
+        }
+    }
+    if ($moving.Count -gt 0) {
+        $results += New-ALZCheckResult 'Subscription placement' 'WARN' "$($moving.Count) platform subscription(s) already sit under another management group" "Subscription placement will move them: $($moving -join '; '). They will pick up the ALZ policy assignments and lose any that applied only at their current parent." $doc
+    }
+    else {
+        $results += New-ALZCheckResult 'Subscription placement' 'OK' 'No platform subscription sits under an unrelated management group'
+    }
+    return $results
+}
+
+function Test-ALZSubscriptionContent {
+    param([hashtable]$Subscriptions)
+    $doc = 'https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only'
+    $populated = @()
+    foreach ($role in @('management', 'connectivity', 'identity', 'security')) {
+        $id = $Subscriptions.$role
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        try {
+            $groups = @(az group list --subscription $id -o json 2>$null | ConvertFrom-Json)
+        }
+        catch { continue }
+        $real = @($groups | Where-Object {
+                $name = $_.name
+                -not ($script:ALZIgnorableResourceGroups | Where-Object { $name -like $_ })
+            })
+        if ($real.Count -gt 0) {
+            $sample = ($real | Select-Object -First 4 | ForEach-Object { $_.name }) -join ', '
+            if ($real.Count -gt 4) { $sample += ", +$($real.Count - 4) more" }
+            $populated += "$role ($($real.Count)): $sample"
+        }
+    }
+    if ($populated.Count -eq 0) {
+        return @(New-ALZCheckResult 'Subscription contents' 'OK' 'Platform subscriptions are empty (greenfield)')
+    }
+    return @(New-ALZCheckResult 'Subscription contents' 'WARN' "$($populated.Count) platform subscription(s) already contain resources" "$($populated -join ' | '). On the first apply the ALZ policy baseline applies to whatever is running: DeployIfNotExists assignments start remediating existing resources and any Deny starts blocking deployments. After a previous ALZ run its own resource groups appear here too, which is expected. For a tenant in real use, follow Microsoft's audit-only transition guidance before deploying." $doc)
+}
+
 function Test-ALZHcpWorkspace {
     param([string]$Token, [string]$HcpOrg, [string]$Workspace)
     if (-not $Token) {
@@ -271,4 +365,4 @@ function Test-ALZHcpWorkspace {
     }
 }
 
-Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZHcpWorkspace
+Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace

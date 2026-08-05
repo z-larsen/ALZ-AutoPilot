@@ -56,6 +56,7 @@ The accelerator's documented requirement to review the platform configuration be
 |---|---|
 | Steps spread across a wizard, two web UIs, and several doc pages | One `Start-ALZDelivery.ps1` entry point |
 | Errors surface as Terraform stack traces mid-apply | Preflight validates tooling, Azure Owner, resource providers, GitHub PAT/org/Members, and HCP **before** bootstrap |
+| Pointing a greenfield tool at a tenant that is already in use | Preflight detects an existing hierarchy, subscriptions parented elsewhere, and subscriptions that already contain resources |
 | A closed terminal means spelunking through `output/` | State saved after every step; re-run resumes automatically |
 | Hand-edit `inputs.yaml` and dodge `${starter_location_01}` token traps | Config generated from your answers |
 | Cryptic failures (RP timeout, SSO, backend-config, TF_TOKEN, missing Workflows/Members scope) | Known failures matched to plain-language remediation |
@@ -205,7 +206,7 @@ If you pick a different Terraform scenario on a re-run, the tool notices the exi
 
 | Limitation | Detail |
 |---|---|
-| **Brownfield tenants** | The tool is greenfield-first. It offers a parent management group so the hierarchy can nest under an existing one, but preflight does not check for colliding management group names, `update_existing` is not exposed, and nothing warns that subscription placement moves live subscriptions into policy scope. In a populated tenant the policy baseline applies to running workloads on the first apply. Follow Microsoft's [audit-only transition guidance](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only) before pointing this at production |
+| **Brownfield tenants** | Preflight detects an existing estate: colliding management group names, platform subscriptions already parented elsewhere, and subscriptions that already contain resources. It warns rather than blocks. What it still does not do is adopt an existing hierarchy (`update_existing` is not exposed). In a populated tenant the policy baseline applies to running workloads on the first apply, so follow Microsoft's [audit-only transition guidance](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only) before pointing this at production |
 | **Azure DevOps stage 2** | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only |
 | **Local file system VCS** | Not supported. Use the accelerator directly |
 | **`bicep-classic`** | Not exposed. Terraform and Bicep only |

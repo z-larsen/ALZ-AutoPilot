@@ -200,6 +200,13 @@ if ($runPreflight) {
         Write-ALZStatus -Status RUN -Message "Checking $($providers.Count) resource providers on the current subscription..."
         $r = Test-ALZResourceProviders -Providers $providers; Write-ALZResults $r; $results += $r
 
+        Write-ALZStatus -Status RUN -Message 'Checking for an existing management group hierarchy and subscription placement...'
+        $r = Test-ALZExistingEstate -Subscriptions $state.answers.subscriptions -ParentManagementGroupId $state.answers.parentManagementGroupId
+        Write-ALZResults $r; $results += $r
+
+        Write-ALZStatus -Status RUN -Message 'Checking whether the platform subscriptions already contain resources...'
+        $r = Test-ALZSubscriptionContent -Subscriptions $state.answers.subscriptions; Write-ALZResults $r; $results += $r
+
         if ($state.answers.vcs -eq 'azuredevops') {
             $adoToken = $null
             if (Read-ALZConfirm -Prompt 'Validate the Azure DevOps PAT, org and project now (recommended)?' -Default $true) {

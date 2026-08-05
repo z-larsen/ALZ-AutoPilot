@@ -111,6 +111,7 @@ Each check runs live and prints a remediation panel with the exact fix if it fai
 - Azure sign-in and subscription context
 - Owner rights on the platform subscriptions
 - Resource providers, with an offer to register them across all subscriptions
+- Existing management groups, subscription placement, and whether the platform subscriptions already contain resources (see [Brownfield tenants](#brownfield-tenants))
 - GitHub PAT, org access, plan type, and a proactive probe of the Members permission
 - HCP workspace and execution mode, when HCP is selected
 
@@ -226,17 +227,19 @@ The app matches failures against a catalog of known signatures and prints the fi
 | Azure DevOps stage 2 | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only today, so Azure DevOps prints the runbook instead |
 | `bicep-classic` | The accelerator accepts it; this app offers Terraform and Bicep only |
 | Automatic editing of your repos | The HCP migration is verified, not applied. Editing a customer's IaC blind is riskier than checking it |
-| Brownfield tenants | The tool is greenfield-first, see the caution below |
+| Brownfield tenants | Existing estates are detected and flagged, but an existing hierarchy is not adopted. See the caution below |
 
 ## Brownfield tenants
 
 If the target tenant already has management groups, or the platform subscriptions already contain workloads, read this before running.
 
-The app offers a parent management group so the hierarchy can nest under an existing one, which matches Microsoft's documented transition pattern. Beyond that it does not accommodate an existing estate:
+The app offers a parent management group so the hierarchy can nest under an existing one, which matches Microsoft's documented transition pattern. Preflight also detects the signs of an existing estate and warns:
 
-- Preflight does not check for management group names that collide with the ALZ ones.
-- `update_existing` is not exposed, so an existing hierarchy is not adopted.
-- Nothing warns that subscription placement **moves live subscriptions** into a new policy scope.
+- **Existing management groups**: any of the ALZ names already present. A full set is treated as a re-run, a partial set as a collision, because the accelerator does not adopt existing groups by default.
+- **Subscription placement**: a platform subscription already parented under an unrelated management group, since placement will move it and change which policies apply.
+- **Subscription contents**: a platform subscription that already holds resource groups.
+
+These warn, they never block. What the app still does not do is adopt an existing hierarchy, because `update_existing` is not exposed.
 
 The risk is the policy baseline. Against empty subscriptions it applies to nothing. Against a populated tenant, every enforced assignment applies to running workloads on the first apply: `DeployIfNotExists` assignments begin remediating existing resources, and any `Deny` starts blocking deployments for application teams.
 
