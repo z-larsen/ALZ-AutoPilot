@@ -21,6 +21,10 @@
 ###########################################################################
 
 $script:PhaseOrder = @('interview', 'preflight', 'config', 'bootstrap', 'proof', 'hcp', 'run', 'complete')
+# Rough monthly cost of the infrastructure the private-networking option deploys:
+# a Premium container registry (needed for the private endpoint), two container
+# instances, a NAT gateway, a public IP, and two private endpoints.
+$script:BootstrapInfraUsd = 200
 $script:PhaseLabels = @{
     interview = 'Plan (interview)'
     preflight = 'Prerequisites'
@@ -226,18 +230,31 @@ function Write-ALZTargetState {
     if ($Scenario -and $null -ne $Scenario.estimatedMonthlyUsd) {
         $cost = if ($Scenario.estimatedMonthlyUsd -eq 0) { 'no fixed infrastructure cost' } else { ('~${0:N0} / month' -f $Scenario.estimatedMonthlyUsd) }
         $note = if ($Scenario.excludesNvaLicence) { ' (excludes the NVA licence)' } else { '' }
-        & $row 'Est. fixed cost' "$cost$note" $(if ($Scenario.estimatedMonthlyUsd -gt 1000) { 'Yellow' } else { 'Green' })
+        & $row 'Est. topology cost' "$cost$note" $(if ($Scenario.estimatedMonthlyUsd -gt 1000) { 'Yellow' } else { 'Green' })
+    }
+    # Private networking deploys its own billable infrastructure (container registry,
+    # container instances, NAT gateway, public IP, private endpoints) that the scenario
+    # estimate does not cover, so it has to be stated separately or the total reads as zero.
+    if ($Answers.selfHostedRunners -or $Answers.privateNetworking) {
+        & $row 'Est. bootstrap cost' "~`$$($script:BootstrapInfraUsd) / month (private networking + self-hosted runners)" 'Yellow'
     }
 
     & $head 'Management group hierarchy to be created'
     Write-ALZHierarchy -Answers $Answers -SubscriptionNames $SubscriptionNames
 
-    if ($Scenario -and $null -ne $Scenario.estimatedMonthlyUsd -and $Scenario.estimatedMonthlyUsd -gt 0) {
+    if ($Scenario -and $null -ne $Scenario.estimatedMonthlyUsd -and ($Scenario.estimatedMonthlyUsd -gt 0 -or $Answers.selfHostedRunners -or $Answers.privateNetworking)) {
         Write-Host ''
-        Write-Host '   Cost is the accelerator''s own published estimate (westus, USD, fixed' -ForegroundColor DarkGray
-        Write-Host '   infrastructure only; consumption is extra). Source:' -ForegroundColor DarkGray
-        Write-Host '   https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/scenarios/' -ForegroundColor DarkCyan
-        Write-Host '   For another region or currency, run the accelerator''s Get-ScenarioCostEstimates.ps1.' -ForegroundColor DarkGray
+        if ($Scenario.estimatedMonthlyUsd -gt 0) {
+            Write-Host '   Topology cost is the accelerator''s own published estimate (westus, USD, fixed' -ForegroundColor DarkGray
+            Write-Host '   infrastructure only; consumption is extra). Source:' -ForegroundColor DarkGray
+            Write-Host '   https://azure.github.io/Azure-Landing-Zones/accelerator/starter-terraform/scenarios/' -ForegroundColor DarkCyan
+            Write-Host '   For another region or currency, run the accelerator''s Get-ScenarioCostEstimates.ps1.' -ForegroundColor DarkGray
+        }
+        if ($Answers.selfHostedRunners -or $Answers.privateNetworking) {
+            Write-Host '   Bootstrap cost is an approximation for the container registry, container' -ForegroundColor DarkGray
+            Write-Host '   instances, NAT gateway, public IP, and private endpoints that private' -ForegroundColor DarkGray
+            Write-Host '   networking requires. It is separate from the topology estimate.' -ForegroundColor DarkGray
+        }
     }
     Write-Host ''
     Write-Host ('  +' + ('-' * $inner) + '+') -ForegroundColor DarkCyan

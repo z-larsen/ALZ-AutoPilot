@@ -7,6 +7,11 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.7.0
+
+- The confirmation screen now estimates the **bootstrap infrastructure** cost separately. Private networking deploys a container registry, container instances, a NAT gateway, a public IP, and private endpoints, roughly $200/month, none of which the scenario estimate covers. A management-only delivery with private networking previously displayed "no fixed infrastructure cost", which was wrong in the direction that matters. The single row is now split into **Est. topology cost** and **Est. bootstrap cost**.
+- Corrected the delivery name prompt. It said "used for the output folder", which it never was. The value is a label for the console and report only, and never reaches `inputs.yaml` or Azure.
+
 ## 1.6.4
 
 - Removed the Versioning section from the README. The version badge links to this file, which already explains the scheme.

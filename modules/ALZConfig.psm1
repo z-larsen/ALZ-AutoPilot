@@ -40,7 +40,7 @@ function Invoke-ALZInterview {
     Write-Host '  Answer a few questions. Press Enter to accept a [default].' -ForegroundColor DarkGray
     Write-Host '  Values are saved after each step, so you can stop and resume anytime.' -ForegroundColor DarkGray
 
-    $a.deliveryName = Read-ALZValue -Prompt 'Delivery / tenant name (used for the output folder)' -Default $(if ($a.deliveryName) { $a.deliveryName } else { 'My Tenant' }) -Validator ${function:Test-ALZNotEmpty}
+    $a.deliveryName = Read-ALZValue -Prompt 'Delivery / tenant name (a label for the console and report only)' -Default $(if ($a.deliveryName) { $a.deliveryName } else { 'My Tenant' }) -Validator ${function:Test-ALZNotEmpty}
     $a.region = Read-ALZValue -Prompt 'Primary Azure region (e.g. southcentralus)' -Default $a.region -Validator ${function:Test-ALZRegionName} -ValidationMessage 'Use the lowercase region name, e.g. eastus2 or southcentralus.'
 
     Write-ALZSection 'Version control system'
