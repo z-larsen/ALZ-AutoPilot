@@ -7,6 +7,11 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.7.1
+
+- Rewrote the brownfield guidance into an actionable procedure: adopting an existing hierarchy with `update_existing`, landing the baseline in audit-only with per-assignment `enforcement_mode`, and standing up the hierarchy without moving any subscriptions by removing the placement block at the review gate. All of it already worked, none of it was written down.
+- Corrected the description of policy effects on existing resources. The docs claimed `DeployIfNotExists` begins remediating what is already deployed. It does not: existing resources are marked non-compliant and only change when a remediation task is triggered, and `Deny` affects create and update rather than existing resources.
+
 ## 1.7.0
 
 - The confirmation screen now estimates the **bootstrap infrastructure** cost separately. Private networking deploys a container registry, container instances, a NAT gateway, a public IP, and private endpoints, roughly $200/month, none of which the scenario estimate covers. A management-only delivery with private networking previously displayed "no fixed infrastructure cost", which was wrong in the direction that matters. The single row is now split into **Est. topology cost** and **Est. bootstrap cost**.

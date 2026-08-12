@@ -255,21 +255,70 @@ The app matches failures against a catalog of known signatures and prints the fi
 
 ## Brownfield tenants
 
-If the target tenant already has management groups, or the platform subscriptions already contain workloads, read this before running.
+The accelerator deploys into an existing tenant perfectly well. What it doesn't give you is a documented transition sequence, and neither does this app's interview. Everything below is reachable, it just isn't prompted for.
 
-The app offers a parent management group so the hierarchy can nest under an existing one, which matches Microsoft's documented transition pattern. Preflight also detects the signs of an existing estate and warns:
+### What preflight tells you
 
-- **Existing management groups**: any of the ALZ names already present. A full set is treated as a re-run, a partial set as a collision, because the accelerator does not adopt existing groups by default.
+- **Existing management groups**: any of the ALZ names already present. A full set is read as a re-run, a partial set as a collision.
 - **Subscription placement**: a platform subscription already parented under an unrelated management group, since placement will move it and change which policies apply.
 - **Subscription contents**: a platform subscription that already holds resource groups.
 
-These warn, they never block. What the app still does not do is adopt an existing hierarchy, because `update_existing` is not exposed.
+All three warn and never block, because deploying into a populated tenant is legitimate.
 
-The risk is the policy baseline. Against empty subscriptions it applies to nothing. Against a populated tenant, every enforced assignment applies to running workloads on the first apply: `DeployIfNotExists` assignments begin remediating existing resources, and any `Deny` starts blocking deployments for application teams.
+### What the policy baseline actually does to existing resources
 
-Microsoft's guidance is to duplicate the landing zone management group with policies in **audit only** mode, assess compliance, and move subscriptions in once they are ready. See [Transition an environment by duplicating a landing zone management group](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only).
+Worth being precise, because this is usually overstated:
 
-Rehearse in a clean tenant first.
+- **Deny** blocks create and update operations. It does not touch resources that already exist.
+- **DeployIfNotExists** marks existing resources non-compliant but will not modify them until someone triggers a [remediation task](https://learn.microsoft.com/azure/governance/policy/how-to/remediate-resources). It applies automatically only on create or update.
+
+So the baseline does not retroactively rewrite a running estate. The impact is on what gets deployed afterwards, plus compliance findings. That is still a change-control conversation, but it is not the emergency it is sometimes described as.
+
+### Doing a controlled brownfield rollout
+
+The platform config is yours after generation. The app patches only regions, security contact, and subscription placement on a re-run, so anything else you add survives. Use the **review gate** (the stop after config generation, before bootstrap) to make these edits.
+
+**1. Adopt an existing hierarchy** rather than colliding with it:
+
+```hcl
+management_group_settings = {
+  management_group_hierarchy_settings = {
+    default_management_group_name = "alz"
+    update_existing               = true
+  }
+  ...
+}
+```
+
+**2. Land the baseline in audit-only** so nothing enforces on day one:
+
+```hcl
+policy_assignments_to_modify = {
+  alz = {
+    policy_assignments = {
+      Deny-Classic-Resources = { enforcement_mode = "DoNotEnforce" }
+    }
+  }
+}
+```
+
+There is no global switch for this. `enforcement_mode` is per assignment, so list the ones you care about. Get the exact names from your own tenant, since they are version-stamped:
+
+```powershell
+az policy assignment list --scope "/providers/Microsoft.Management/managementGroups/alz" -o table
+```
+
+**3. Stand up the hierarchy without moving any subscriptions.** Delete the whole `subscription_placement` block at the review gate. The app will not put it back: `Set-ALZTfvarsSubscriptionPlacement` looks for the block and exits if it is gone. The interview still requires management and connectivity subscription IDs, so supply real ones you own, then remove the placement.
+
+That gives you the sequence Microsoft recommends: structure and policy first, assess compliance, then move subscriptions in deliberately once they are ready. See [Transition an environment by duplicating a landing zone management group](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only).
+
+**4. Move subscriptions in later** by re-adding placement for one subscription at a time and letting the pipeline apply it, reviewing the plan each time.
+
+### Before you point this at production
+
+- Rehearse the whole thing in a clean tenant.
+- Confirm you have Owner on the parent management group. In an established tenant that often needs [elevated access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) at the root and is not granted by default.
+- Check whether the Defender plans in the scenario config matter to you. The scenario sets twelve of them to `DeployIfNotExists`, which costs nothing on empty subscriptions and becomes real money once workload subscriptions join the hierarchy.
 
 Full run transcripts are written to `%TEMP%\alz-bootstrap-<timestamp>.log` with tokens redacted.
 

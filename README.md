@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.1-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -245,7 +245,7 @@ If you pick a different Terraform scenario on a re-run, the tool notices the exi
 
 | Limitation | Detail |
 |---|---|
-| **Brownfield tenants** | Preflight detects an existing estate: colliding management group names, platform subscriptions already parented elsewhere, and subscriptions that already contain resources. It warns rather than blocks. What it still does not do is adopt an existing hierarchy (`update_existing` is not exposed). In a populated tenant the policy baseline applies to running workloads on the first apply, so follow Microsoft's [audit-only transition guidance](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/align-approach-duplicate-brownfield-audit-only) before pointing this at production |
+| **Brownfield tenants** | Supported, but not guided. Preflight detects colliding management group names, subscriptions parented elsewhere, and subscriptions that already contain resources, and warns rather than blocks. Adopting an existing hierarchy, landing the baseline in audit-only, and deploying structure without moving subscriptions are all done by editing the platform config at the review gate. See [Brownfield tenants](HOW-TO-USE.md#brownfield-tenants). The interview does require management and connectivity subscription IDs |
 | **Azure DevOps stage 2** | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only |
 | **Local file system VCS** | Not supported. Use the accelerator directly |
 | **`bicep-classic`** | Not exposed. Terraform and Bicep only |
