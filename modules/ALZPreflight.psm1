@@ -296,7 +296,7 @@ function Test-ALZExistingEstate {
         $results += New-ALZCheckResult 'Existing management groups' 'OK' "An ALZ hierarchy is already present ($($collisions.Count) of the expected groups)" 'This looks like a re-run against an existing deployment rather than a new tenant.'
     }
     else {
-        $results += New-ALZCheckResult 'Existing management groups' 'WARN' "$($collisions.Count) ALZ management group name(s) already exist: $($collisions -join ', ')" "The accelerator does not adopt existing management groups by default (update_existing defaults to false, and this app does not expose it). Either remove them, deploy under a different parent management group, or plan the transition deliberately." $doc
+        $results += New-ALZCheckResult 'Existing management groups' 'WARN' "$($collisions.Count) ALZ management group name(s) already exist: $($collisions -join ', ')" "The accelerator does not adopt existing management groups by default (update_existing defaults to false). To adopt them, set update_existing = true in the platform config at the review gate. Otherwise deploy under a different parent management group, or remove them. See the 'Brownfield tenants' section of HOW-TO-USE.md." $doc
     }
 
     # A subscription already sitting under a management group is being moved, not placed.
@@ -346,7 +346,7 @@ function Test-ALZSubscriptionContent {
     if ($populated.Count -eq 0) {
         return @(New-ALZCheckResult 'Subscription contents' 'OK' 'Platform subscriptions are empty (greenfield)')
     }
-    return @(New-ALZCheckResult 'Subscription contents' 'WARN' "$($populated.Count) platform subscription(s) already contain resources" "$($populated -join ' | '). On the first apply the ALZ policy baseline applies to whatever is running: DeployIfNotExists assignments start remediating existing resources and any Deny starts blocking deployments. After a previous ALZ run its own resource groups appear here too, which is expected. For a tenant in real use, follow Microsoft's audit-only transition guidance before deploying." $doc)
+    return @(New-ALZCheckResult 'Subscription contents' 'WARN' "$($populated.Count) platform subscription(s) already contain resources" "$($populated -join ' | '). On the first apply the ALZ policy baseline starts evaluating what is already running: Deny assignments block new create and update operations while existing resources keep running, and DeployIfNotExists assignments mark existing resources non-compliant without changing them until a remediation task is triggered. After a previous ALZ run its own resource groups appear here too, which is expected. To land the baseline audit-only first, see the 'Brownfield tenants' section of HOW-TO-USE.md." $doc)
 }
 
 function Test-ALZHcpWorkspace {
