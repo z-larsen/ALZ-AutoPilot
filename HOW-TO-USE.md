@@ -251,7 +251,7 @@ The app matches failures against a catalog of known signatures and prints the fi
 | Azure DevOps stage 2 | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only today, so Azure DevOps prints the runbook instead |
 | `bicep-classic` | The accelerator accepts it; this app offers Terraform and Bicep only |
 | Automatic editing of your repos | The HCP migration is verified, not applied. Editing a customer's IaC blind is riskier than checking it |
-| Brownfield tenants | Existing estates are detected and flagged, but an existing hierarchy is not adopted. See the caution below |
+| Brownfield tenants | Not guided rather than unsupported. Preflight detects and warns, but the interview never asks. Adopting an existing hierarchy, landing the baseline audit-only, and deploying structure without moving subscriptions are all hand edits at the review gate, documented in [Brownfield tenants](#brownfield-tenants) below |
 
 ## Brownfield tenants
 

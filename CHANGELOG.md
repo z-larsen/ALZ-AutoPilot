@@ -7,6 +7,10 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.7.3
+
+- Fixed the last stale brownfield claim, a row in the HOW-TO-USE unsupported table that said an existing hierarchy is not adopted, sitting directly above the section explaining how to adopt one.
+
 ## 1.7.2
 
 - Corrected the two brownfield preflight warnings, which are the messages a delivery lead actually reads on screen when pointing the app at a tenant in use. The subscription contents check repeated the `DeployIfNotExists` error fixed in the docs in 1.7.1, and the management group check still said adopting an existing hierarchy was not possible. Both now match the documented procedure and point at it.
