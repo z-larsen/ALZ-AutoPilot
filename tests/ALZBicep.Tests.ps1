@@ -25,7 +25,6 @@ BeforeAll {
     Import-Module (Join-Path $global:ALZBicepTestsRepoRoot 'modules/ALZState.psm1') -Force
     Import-Module (Join-Path $global:ALZBicepTestsRepoRoot 'modules/ALZConfig.psm1') -Force
     $global:ALZBicepTestsBundledTemplate = Join-Path $global:ALZBicepTestsRepoRoot 'data/scenarios-bicep/platform-landing-zone.yaml'
-    $global:ALZBicepTestsBundledTemplate = Join-Path $global:ALZBicepTestsRepoRoot 'data/scenarios-bicep/platform-landing-zone.yaml'
     $script:NewTestState = {
         param(
             [string]$PrimaryRegion = 'eastus2',
