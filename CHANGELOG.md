@@ -7,6 +7,15 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.8.0
+
+- Generate handoff reports for manual GitHub and Azure DevOps paths without marking a pending deployment complete. Label resource counts as observed inventory.
+- Add custom library selection, missing-path validation, and a review-gate check for libraries added after config generation.
+- Add Terraform networking questions for VPN and ExpressRoute gateways, DDoS protection, Azure Firewall/NVA selection, firewall SKU, and supported NAT gateway attachment. Preserve existing config unless regeneration is explicitly approved.
+- Add HTTPS connectivity diagnostics and a connectivity-only mode for proxy, TLS, DNS, timeout, and download failures. No proxy settings or certificate verification controls are changed.
+- Add mocked Pester tests and Windows/Linux CI with PowerShell validation, generated Terraform checks, and required bootstrap schema conformance.
+- Mark the wrapper's Bicep integration as preview and document the remaining validation and networking limits.
+
 ## 1.7.3
 
 - Fixed the last stale brownfield claim, a row in the HOW-TO-USE unsupported table that said an existing hierarchy is not adopted, sitting directly above the section explaining how to adopt one.

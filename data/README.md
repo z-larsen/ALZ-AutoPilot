@@ -24,7 +24,7 @@ Terraform files are renamed to the scenario key the app uses, so the mapping is 
 | `smb-single-region-hub-and-spoke-vnet-with-azure-firewall` | `smb-single-region/hub-and-spoke-vnet.tfvars` |
 | `smb-single-region-virtual-wan-with-azure-firewall` | `smb-single-region/virtual-wan.tfvars` |
 
-They are bundled rather than downloaded so a delivery works offline, behind a restrictive proxy, and against a known-good version instead of whatever upstream happens to be that day.
+They are bundled so configuration generation does not depend on downloading a scenario. Bootstrap and deployment still need internet access for tools, modules, providers, Azure, and version control. Bundling does not make the accelerator work offline or establish corporate proxy support; use the connectivity preflight and follow the [upstream prerequisites](https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/).
 
 **Refreshing them**: re-download from the upstream paths above and drop them in with the same names. Always check the upstream repositories for the current versions before a customer engagement.
 

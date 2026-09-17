@@ -129,6 +129,7 @@ function Invoke-ALZInterview {
     $a.iacType = if ($iacPick -eq '2') { 'bicep' } else { 'terraform' }
 
     if ($a.iacType -eq 'bicep') {
+        Write-ALZStatus -Status WARN -Message 'Bicep support is preview: configuration generation and bootstrap wiring only.' -Detail 'An end-to-end Bicep deployment has not been validated. Review the generated YAML and Bicep before deployment; Terraform networking questions do not apply to this path.'
         Write-ALZSection 'Target topology (your end-state deployment)'
         Write-Host '  Bicep deploys one of three network types. Management groups, policy, and' -ForegroundColor DarkGray
         Write-Host '  management resources deploy in all three.' -ForegroundColor DarkGray
@@ -196,8 +197,199 @@ function Invoke-ALZInterview {
     $a.privateNetworking = $secure
     $a.selfHostedRunners = $secure
 
+    Write-ALZSection 'Custom ALZ library'
+    Write-Host '  The accelerator can include your management groups, archetypes, and policies from a lib folder.' -ForegroundColor DarkGray
+    Write-Host '  Leave this blank to use config/lib in the delivery folder when it exists.' -ForegroundColor DarkGray
+    $a.customLibraryPath = Read-ALZValue -Prompt 'Existing custom library folder (full path ending in lib, optional)' -Default $a.customLibraryPath -Validator {
+        param($value)
+        [string]::IsNullOrWhiteSpace($value) -or ((Test-Path -LiteralPath $value -PathType Container) -and (Split-Path $value.TrimEnd([char[]]'\/') -Leaf) -eq 'lib')
+    } -ValidationMessage 'Choose an existing folder named lib, or leave blank for config/lib.'
+
+    Invoke-ALZNetworkInterview -State $State -DataPath $DataPath
     Set-ALZPhaseStatus -State $State -Phase 'interview' -Status 'done'
     return $State
+}
+
+function Get-ALZScenarioScalar {
+    param([string]$Content, [string]$Key)
+    $pattern = '(?m)^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*(true|false|"[^"\r\n]*")[ \t]*\r?$'
+    $found = [regex]::Matches($Content, $pattern)
+    if ($found.Count -ne 1) { throw "Expected one scalar setting '$Key' in the bundled scenario; found $($found.Count)." }
+    return ($found[0].Groups[1].Value | ConvertFrom-Json)
+}
+
+function Get-ALZNetworkDefaults {
+    param([string]$Scenario, [string]$DataPath)
+    $catalog = (Get-Content (Join-Path $DataPath 'scenarios.json') -Raw | ConvertFrom-Json).scenarios
+    $selected = $catalog | Where-Object key -EQ $Scenario | Select-Object -First 1
+    if (-not $selected) { throw "Unknown networking scenario '$Scenario'." }
+    if ($selected.connectivityType -eq 'none') { return [ordered]@{} }
+    $content = Get-Content (Join-Path $DataPath "scenarios/$Scenario.tfvars") -Raw
+    $settings = [ordered]@{
+        scenario = $Scenario
+        ddosProtectionPlanEnabled = Get-ALZScenarioScalar -Content $content -Key 'ddos_protection_plan_enabled'
+        regions = [ordered]@{}
+    }
+    $regionKeys = if ($selected.regions -eq 'multi') { @('primary', 'secondary') } else { @('primary') }
+    foreach ($regionKey in $regionKeys) {
+        $settings.regions[$regionKey] = [ordered]@{
+            vpnGatewayEnabled = Get-ALZScenarioScalar -Content $content -Key "${regionKey}_virtual_network_gateway_vpn_enabled"
+            expressRouteGatewayEnabled = Get-ALZScenarioScalar -Content $content -Key "${regionKey}_virtual_network_gateway_express_route_enabled"
+            firewallSku = if ($selected.firewall -like 'azure_firewall*') { Get-ALZScenarioScalar -Content $content -Key "${regionKey}_firewall_sku_tier" } else { '' }
+            natGatewayEnabled = $false
+            natGatewaySku = 'StandardV2'
+        }
+    }
+    return $settings
+}
+
+function Invoke-ALZNetworkInterview {
+    param([hashtable]$State, [string]$DataPath)
+    $answers = $State.answers
+    if ($answers.iacType -eq 'bicep' -or $answers.scenario -eq 'management-only') {
+        $answers.networking = [ordered]@{}
+        return
+    }
+    Write-ALZSection 'Platform network options'
+    if ($answers.scenario -notlike 'smb-*') {
+        $inspection = Read-ALZValue -Prompt 'Traffic inspection (1 = Azure Firewall, 2 = NVA with separate vendor deployment)' -Default $(if ($answers.scenario -like '*-with-nva') { '2' } else { '1' }) -Validator { param($value) $value -in @('1', '2') }
+        $answers.scenario = if ($inspection -eq '2') { $answers.scenario -replace '-with-azure-firewall$', '-with-nva' } else { $answers.scenario -replace '-with-nva$', '-with-azure-firewall' }
+    }
+    $settings = if ($answers.networking -and $answers.networking.scenario -eq $answers.scenario) { $answers.networking } else { Get-ALZNetworkDefaults -Scenario $answers.scenario -DataPath $DataPath }
+    Write-Host '  These choices create Azure resources. Circuits, VPN sites, connections, BGP, and routing still need design and configuration.' -ForegroundColor DarkGray
+    $settings.ddosProtectionPlanEnabled = Read-ALZConfirm -Prompt 'Deploy a DDoS Network Protection plan (billable)?' -Default ([bool]$settings.ddosProtectionPlanEnabled)
+    if (-not $settings.ddosProtectionPlanEnabled) {
+        Write-ALZStatus -Status WARN -Message 'No DDoS Network Protection plan will be created.' -Detail 'The generated config also disables the Enable-DDoS-VNET assignments at connectivity and landingzones. Review alternative protection and your custom policy library.'
+    }
+    foreach ($regionKey in @($settings.regions.Keys)) {
+        $region = $settings.regions[$regionKey]
+        Write-ALZSection "$regionKey region networking"
+        $region.vpnGatewayEnabled = Read-ALZConfirm -Prompt 'Create a VPN gateway?' -Default ([bool]$region.vpnGatewayEnabled)
+        $region.expressRouteGatewayEnabled = Read-ALZConfirm -Prompt 'Create an ExpressRoute gateway (circuit and connection not included)?' -Default ([bool]$region.expressRouteGatewayEnabled)
+        if ($answers.scenario -like '*-with-azure-firewall') {
+            $region.firewallSku = Read-ALZValue -Prompt 'Azure Firewall SKU (Basic/Standard/Premium)' -Default $region.firewallSku -Validator { param($value) $value -cin @('Basic', 'Standard', 'Premium') }
+            if ($region.firewallSku -eq 'Basic') {
+                Write-ALZStatus -Status WARN -Message 'Basic has no DNS proxy, TLS inspection, or IDPS.' -Detail 'Review DNS and security requirements before selecting Basic.'
+            }
+            if ($answers.scenario -like '*hub-and-spoke*' -and $region.firewallSku -ne 'Basic') {
+                $region.natGatewayEnabled = Read-ALZConfirm -Prompt 'Create a NAT gateway and attach it to AzureFirewallSubnet for outbound SNAT?' -Default ([bool]$region.natGatewayEnabled)
+                if ($region.natGatewayEnabled) {
+                    $region.natGatewaySku = Read-ALZValue -Prompt 'NAT gateway SKU (StandardV2/Standard)' -Default $(if ($region.natGatewaySku) { $region.natGatewaySku } else { 'StandardV2' }) -Validator { param($value) $value -cin @('StandardV2', 'Standard') }
+                    Write-ALZStatus -Status INFO -Message 'Check NAT SKU availability in the selected Azure region.' -Detail 'StandardV2 supports zone redundancy and requires StandardV2 public IPs. Standard NAT is not zone-redundant; review the firewall resiliency design before selecting it.'
+                }
+            }
+            else {
+                $region.natGatewayEnabled = $false
+                Write-ALZStatus -Status INFO -Message 'NAT gateway generation is limited to hub-and-spoke with Azure Firewall Standard or Premium.' -Detail 'Virtual WAN hub and spoke-subnet NAT configurations are not generated here.'
+            }
+        }
+        else {
+            $region.natGatewayEnabled = $false
+            Write-ALZStatus -Status WARN -Message 'The NVA scenario prepares networking, not a vendor appliance.' -Detail 'Review the NVA next-hop IP, subnet, vendor deployment, licensing, and routing in the platform config. NAT attachment for NVA subnets is not generated.'
+        }
+    }
+    $answers.networking = $settings
+    Save-ALZState -State $State
+}
+
+function Set-ALZScenarioScalar {
+    param([string]$Content, [string]$Key, $Value)
+    $null = Get-ALZScenarioScalar -Content $Content -Key $Key
+    $pattern = '(?m)^([ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*)(true|false|"[^"\r\n]*")([ \t]*\r?)$'
+    $literal = $Value | ConvertTo-Json -Compress
+    return [regex]::Replace($Content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Groups[1].Value + $literal + $match.Groups[3].Value })
+}
+
+function ConvertTo-ALZNetworkConfig {
+    param([string]$Content, $Settings, [string]$Scenario, [string]$DataPath)
+    if (-not $Settings -or $Settings.Count -eq 0) { return $Content }
+    $defaults = Get-ALZNetworkDefaults -Scenario $Scenario -DataPath $DataPath
+    if ($Settings.scenario -ne $Scenario -or $defaults.Count -eq 0) { throw 'Networking answers do not match the selected scenario. Re-run the interview.' }
+    if ($Settings.ddosProtectionPlanEnabled -isnot [bool]) { throw 'The DDoS selection must be a boolean.' }
+    if (@($Settings.regions.Keys).Count -ne @($defaults.regions.Keys).Count) { throw 'Networking answers must include exactly the regions in the selected scenario.' }
+    $Content = Set-ALZScenarioScalar -Content $Content -Key 'ddos_protection_plan_enabled' -Value $Settings.ddosProtectionPlanEnabled
+    foreach ($regionKey in $defaults.regions.Keys) {
+        $region = $Settings.regions[$regionKey]
+        if (-not $region -or $region.vpnGatewayEnabled -isnot [bool] -or $region.expressRouteGatewayEnabled -isnot [bool] -or $region.natGatewayEnabled -isnot [bool]) {
+            throw "Invalid networking selections for $regionKey."
+        }
+        $Content = Set-ALZScenarioScalar -Content $Content -Key "${regionKey}_virtual_network_gateway_vpn_enabled" -Value $region.vpnGatewayEnabled
+        $Content = Set-ALZScenarioScalar -Content $Content -Key "${regionKey}_virtual_network_gateway_express_route_enabled" -Value $region.expressRouteGatewayEnabled
+        if ($Scenario -like '*-with-azure-firewall') {
+            if ($region.firewallSku -cnotin @('Basic', 'Standard', 'Premium')) { throw 'Unsupported Azure Firewall SKU.' }
+            $Content = Set-ALZScenarioScalar -Content $Content -Key "${regionKey}_firewall_sku_tier" -Value $region.firewallSku
+        }
+        if ($region.natGatewayEnabled) {
+            if ($Scenario -notlike '*hub-and-spoke-vnet-with-azure-firewall' -or $region.firewallSku -eq 'Basic') { throw 'NAT generation requires hub-and-spoke with Azure Firewall Standard or Premium.' }
+            $natSku = if ($region.natGatewaySku) { $region.natGatewaySku } else { 'StandardV2' }
+            if ($natSku -cnotin @('StandardV2', 'Standard')) { throw 'Unsupported NAT gateway SKU.' }
+            $regionNumber = if ($regionKey -eq 'primary') { '01' } else { '02' }
+            $natBlock = @'
+    nat_gateway = {
+      name = "nat-hub-__REGION__-$${starter_location___NUMBER__}"
+            sku  = "__NAT_SKU__"
+      ip_configurations = {
+        default = {
+          is_default = true
+          public_ip_configuration = {
+            name = "pip-nat-hub-__REGION__-$${starter_location___NUMBER__}"
+            sku  = "__NAT_SKU__"
+          }
+        }
+      }
+    }
+'@
+            $natBlock = $natBlock.Replace('__REGION__', $regionKey).Replace('__NUMBER__', $regionNumber).Replace('__NAT_SKU__', $natSku)
+            $headerPattern = '(?m)^  ' + [regex]::Escape($regionKey) + ' = \{\r?$'
+            $enabledPattern = '(?m)^(      firewall[ \t]*=[ \t]*"\$\$\{' + [regex]::Escape($regionKey) + '_firewall_enabled\}"[ \t]*\r?)$'
+            $firewallPattern = '(?m)^(      sku_tier[ \t]*=[ \t]*"\$\$\{' + [regex]::Escape($regionKey) + '_firewall_sku_tier\}"[ \t]*\r?)$'
+            foreach ($pattern in @($headerPattern, $enabledPattern, $firewallPattern)) {
+                if ([regex]::Matches($Content, $pattern).Count -ne 1) { throw 'The bundled NAT attachment structure changed. Stop and review the scenario before generating.' }
+            }
+            $Content = [regex]::Replace($Content, $headerPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Value + "`n" + $natBlock })
+            $Content = [regex]::Replace($Content, $enabledPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Value + "`n      nat_gateway = true" })
+            $Content = [regex]::Replace($Content, $firewallPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Value + "`n      firewall_subnet_nat_gateway = { assign_generated_nat_gateway = true }" })
+        }
+    }
+    if (-not $Settings.ddosProtectionPlanEnabled) {
+        $Content = [regex]::Replace($Content, '(?m)^    ddos_protection_plan_id[ \t]*=[ \t]*"\$\$\{ddos_protection_plan_id\}"[ \t]*\r?\n', '')
+        if ($Content -notmatch 'Enable-DDoS-VNET') {
+            $policyBlocks = @'
+    connectivity = {
+      policy_assignments = {
+        Enable-DDoS-VNET = { creation_enabled = false }
+      }
+    }
+    landingzones = {
+      policy_assignments = {
+        Enable-DDoS-VNET = { creation_enabled = false }
+      }
+    }
+'@
+            $policyPattern = '(?m)^  policy_assignments_to_modify = \{\r?$'
+            if ([regex]::Matches($Content, $policyPattern).Count -ne 1) { throw 'Could not locate the DDoS policy customization block.' }
+            $Content = [regex]::Replace($Content, $policyPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Value + "`n" + $policyBlocks })
+        }
+    }
+    elseif ($Scenario -like 'smb-*') {
+        $Content = [regex]::Replace($Content, '(?m)^    #ddos_protection_plan_id', '    ddos_protection_plan_id')
+        $policyPattern = '(?m)^    (connectivity|landingzones) = \{\s+policy_assignments = \{\s+Enable-DDoS-VNET = \{\s+creation_enabled = false\s+\}\s+\}\s+\}\r?\n'
+        if ([regex]::Matches($Content, $policyPattern).Count -ne 2) { throw 'The bundled SMB DDoS policy structure changed. Review it before generation.' }
+        $Content = [regex]::Replace($Content, $policyPattern, '')
+    }
+    return $Content
+}
+
+function Get-ALZCustomLibraryPath {
+    param([hashtable]$State, [string]$ConfigFolder)
+    $libraryPath = if ($State.answers.customLibraryPath) { $State.answers.customLibraryPath } else { Join-Path $ConfigFolder 'lib' }
+    if (-not (Test-Path -LiteralPath $libraryPath -PathType Container)) {
+        if ($State.answers.customLibraryPath) { throw 'The selected custom library folder does not exist. Update the library path before bootstrap.' }
+        return $null
+    }
+    $resolved = (Resolve-Path -LiteralPath $libraryPath).ProviderPath
+    if ((Split-Path $resolved -Leaf) -ne 'lib') { throw 'The custom library folder must be named lib so the accelerator copies it to the expected location.' }
+    return $resolved
 }
 
 function Write-ALZInputsYaml {
@@ -271,11 +463,11 @@ apply_approvers: [$approvers]
     # A custom ALZ library (custom management groups, archetypes, policy definitions and
     # assignments) lives in <config>\lib. Passing explicit config paths disables the
     # accelerator's auto-discovery, so the folder has to be declared here or it is ignored.
-    $libPath = Join-Path $ConfigFolder 'lib'
+    $libPath = Get-ALZCustomLibraryPath -State $State -ConfigFolder $ConfigFolder
     $additionalFiles = ''
-    if (Test-Path $libPath) {
+    if ($libPath) {
         $libYaml = ($libPath -replace '\\', '/')
-        $additionalFiles = "`nstarter_additional_files: [`"$libYaml`"]"
+        $additionalFiles = "`nstarter_additional_files: [$($libYaml | ConvertTo-Json -Compress)]"
     }
 
     $yaml = @"
@@ -394,7 +586,7 @@ function Write-ALZBicepConfig {
 }
 
 function Write-ALZStarterTfvars {
-    param([hashtable]$State, [string]$ConfigFolder, [string]$DataPath)
+    param([hashtable]$State, [string]$ConfigFolder, [string]$DataPath, [switch]$Regenerate)
     $a = $State.answers
     if (-not (Test-Path $ConfigFolder)) { New-Item -ItemType Directory -Path $ConfigFolder -Force | Out-Null }
     $tfvarsPath = Join-Path $ConfigFolder 'platform-landing-zone.tfvars'
@@ -404,7 +596,7 @@ function Write-ALZStarterTfvars {
     if ($a.scenario -notmatch '^[a-z0-9-]+$') { throw "Invalid scenario key '$($a.scenario)'." }
     $source = Join-Path $DataPath "scenarios\$($a.scenario).tfvars"
 
-    if (Test-Path $tfvarsPath) {
+    if ((Test-Path $tfvarsPath) -and -not $Regenerate) {
         # Re-run: patch the values we own and leave everything else alone, because the
         # tfvars is the file customers are expected to hand-edit.
         Set-ALZTfvarsRegion -TfvarsPath $tfvarsPath -Region $a.region -SecondaryRegion $a.regionSecondary -SecurityContactEmail $email | Out-Null
@@ -415,9 +607,12 @@ function Write-ALZStarterTfvars {
     if (-not (Test-Path $source)) {
         throw "No bundled configuration for scenario '$($a.scenario)'. Expected: $source"
     }
-    Copy-Item -LiteralPath $source -Destination $tfvarsPath -Force
+    $content = Get-Content -LiteralPath $source -Raw
+    $content = ConvertTo-ALZNetworkConfig -Content $content -Settings $a.networking -Scenario $a.scenario -DataPath $DataPath
+    $content | Set-Content -LiteralPath $tfvarsPath -Encoding UTF8
     Set-ALZTfvarsRegion -TfvarsPath $tfvarsPath -Region $a.region -SecondaryRegion $a.regionSecondary -SecurityContactEmail $email | Out-Null
     Set-ALZTfvarsSubscriptionPlacement -TfvarsPath $tfvarsPath -Subscriptions $a.subscriptions | Out-Null
+    $a['networkSettingsAppliedJson'] = $a.networking | ConvertTo-Json -Depth 10 -Compress
     return $tfvarsPath
 }
 
@@ -456,4 +651,4 @@ function Repair-ALZTfvarsFormat {
     finally { Pop-Location }
 }
 
-Export-ModuleMember -Function Invoke-ALZInterview, Write-ALZInputsYaml, Set-ALZTfvarsRegion, Set-ALZTfvarsSubscriptionPlacement, Write-ALZStarterTfvars, Test-ALZTfvarsMatchesScenario, Write-ALZBicepConfig, Repair-ALZTfvarsFormat
+Export-ModuleMember -Function Invoke-ALZInterview, Invoke-ALZNetworkInterview, Get-ALZNetworkDefaults, Write-ALZInputsYaml, Get-ALZCustomLibraryPath, Set-ALZTfvarsRegion, Set-ALZTfvarsSubscriptionPlacement, Write-ALZStarterTfvars, Test-ALZTfvarsMatchesScenario, Write-ALZBicepConfig, Repair-ALZTfvarsFormat

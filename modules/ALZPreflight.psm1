@@ -41,6 +41,125 @@ function Get-ALZSemver {
     return $null
 }
 
+function Test-ALZConnectivity {
+    param(
+        [ValidateSet('github', 'azuredevops', 'all')][string]$Vcs = 'github',
+        [ValidateSet('terraform', 'bicep')][string]$IacType = 'terraform',
+        [ValidateSet('azurerm', 'hcp')][string]$StateBackend = 'azurerm',
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
+    $doc = 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/'
+    $proxyNames = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy') |
+        Where-Object { [Environment]::GetEnvironmentVariable($_) } | Select-Object -Unique
+    if ($proxyNames) {
+        New-ALZCheckResult 'Proxy configuration' 'WARN' "Proxy environment variables are set: $($proxyNames -join ', '). Values are not displayed." 'The accelerator does not explicitly support corporate proxies. Use an approved execution environment or work with your network team. Passing these PowerShell probes does not validate Git, Azure CLI, Terraform, or runner proxy settings.' $doc
+    }
+    $endpoints = @(
+        @{ Name = 'Microsoft Entra sign-in'; Uri = 'https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration'; Method = 'Get'; ContentType = 'json' }
+        @{ Name = 'Azure Resource Manager'; Uri = 'https://management.azure.com/tenants?api-version=2022-12-01'; Method = 'Get'; AllowUnauthorized = $true }
+        @{ Name = 'Microsoft Graph'; Uri = 'https://graph.microsoft.com/v1.0/organization'; Method = 'Get'; AllowUnauthorized = $true }
+        @{ Name = 'PowerShell Gallery feed'; Uri = 'https://www.powershellgallery.com/api/v2/FindPackagesById()?id=%27ALZ%27&$filter=IsLatestVersion'; Method = 'Get'; ContentType = 'xml'; PackageFeed = $true }
+        @{ Name = 'GitHub API'; Uri = 'https://api.github.com/repos/Azure/ALZ-PowerShell-Module/releases/latest'; ContentType = 'json' }
+        @{ Name = 'GitHub source'; Uri = 'https://raw.githubusercontent.com/Azure/ALZ-PowerShell-Module/main/README.md'; ContentType = 'text/plain' }
+        @{ Name = 'GitHub archive download'; Uri = 'https://github.com/Azure/ALZ-PowerShell-Module/archive/refs/heads/main.zip'; ContentType = 'zip' }
+        @{ Name = 'Bootstrap sample release download'; Uri = 'https://github.com/Azure/accelerator-bootstrap-modules/releases/download/v7.2.1/bootstrap_modules.zip'; ContentType = 'octet-stream|zip' }
+        @{ Name = 'Terraform downloads'; Uri = 'https://releases.hashicorp.com/terraform/index.json'; ContentType = 'json' }
+        @{ Name = 'Terraform Registry'; Uri = 'https://registry.terraform.io/.well-known/terraform.json'; ContentType = 'json' }
+    )
+    if ($Vcs -in @('azuredevops', 'all')) {
+        $endpoints += @{ Name = 'Azure DevOps'; Uri = 'https://dev.azure.com/'; AllowNotFound = $true }
+    }
+    if ($StateBackend -eq 'hcp') {
+        $endpoints += @{ Name = 'HCP Terraform'; Uri = 'https://app.terraform.io/.well-known/terraform.json'; ContentType = 'json' }
+    }
+    if ($IacType -eq 'bicep') {
+        $endpoints += @{ Name = 'Bicep release metadata'; Uri = 'https://api.github.com/repos/Azure/bicep/releases/latest'; ContentType = 'json' }
+    }
+
+    $pending = [System.Collections.Generic.Queue[hashtable]]::new()
+    foreach ($endpoint in $endpoints) { $pending.Enqueue($endpoint) }
+    while ($pending.Count -gt 0) {
+        $endpoint = $pending.Dequeue()
+        $hostName = ([uri]$endpoint.Uri).Host
+        $method = if ($endpoint.Method) { $endpoint.Method } else { 'Head' }
+        try {
+            $response = Invoke-WebRequest -Uri $endpoint.Uri -Method $method -SkipHttpErrorCheck -MaximumRedirection 5 -ConnectionTimeoutSeconds $TimeoutSeconds -OperationTimeoutSeconds $TimeoutSeconds -UserAgent 'ALZ-Autopilot-Preflight' -ErrorAction Stop
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -eq 407) {
+                New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Proxy authentication required (HTTP 407)." 'Have your network team configure approved proxy authentication for this process, or use a supported execution environment. Do not paste proxy credentials into delivery files.' $doc
+            }
+            elseif ($statusCode -eq 401 -and $endpoint.AllowUnauthorized) {
+                New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS reachable (HTTP 401 is expected without credentials). Access permissions are checked separately."
+            }
+            elseif ($statusCode -eq 404 -and $endpoint.AllowNotFound) {
+                New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS reachable (HTTP 404 is expected at the service root). Organization access is unverified."
+            }
+            elseif ($statusCode -ge 200 -and $statusCode -lt 300) {
+                $contentType = [string]($response.Headers['Content-Type'] -join ';')
+                if ($endpoint.ContentType -and $contentType -and $contentType -notmatch $endpoint.ContentType) {
+                    New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Unexpected response type; the request may have reached a proxy sign-in or block page." 'Ask your network team to allow the service and its download redirects. A successful HTTP status alone does not confirm download access.' $doc
+                }
+                else {
+                    if ($endpoint.PackageFeed) {
+                        $feed = [System.Xml.XmlDocument]::new()
+                        $feed.XmlResolver = $null
+                        $feed.LoadXml($response.Content)
+                        $versionNode = $feed.SelectSingleNode("//*[local-name()='Version']")
+                        if (-not $versionNode -or $versionNode.InnerText -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+                            New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - The feed did not return a valid ALZ package version." 'Check PowerShell Gallery availability and whether the proxy rewrote the metadata response.' $doc
+                            continue
+                        }
+                        $pending.Enqueue(@{ Name = 'ALZ module download'; Uri = "https://cdn.powershellgallery.com/packages/alz.$($versionNode.InnerText).nupkg"; ContentType = 'octet-stream|zip' })
+                    }
+                    New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS $method succeeded (HTTP $statusCode)."
+                }
+            }
+            elseif ($method -eq 'Head' -and $statusCode -in @(405, 501)) {
+                New-ALZCheckResult $endpoint.Name 'WARN' "$hostName - HEAD probe is not supported (HTTP $statusCode); download access is unverified." 'Check the download from the same shell. No installer or archive was downloaded by this probe.' $doc
+            }
+            else {
+                New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Request rejected (HTTP $statusCode)." 'Check outbound HTTPS, proxy allowlists, service availability, and download redirects with your network team. For HTTP 429, retry after the service rate limit clears.' $doc
+            }
+        }
+        catch {
+            $failure = $_.Exception
+            $category = 'Connection failed'
+            while ($failure) {
+                if ($failure -is [System.Security.Authentication.AuthenticationException]) {
+                    $category = 'TLS certificate or handshake failed'
+                    break
+                }
+                if ($failure -is [System.TimeoutException] -or $failure -is [System.OperationCanceledException]) {
+                    $category = 'Request timed out'
+                    break
+                }
+                if ($failure -is [System.Net.Sockets.SocketException] -and $failure.SocketErrorCode -in @('HostNotFound', 'NoData', 'TryAgain')) {
+                    $category = 'DNS resolution failed'
+                    break
+                }
+                if ($failure -is [System.Net.Http.HttpRequestException] -and $failure.StatusCode -eq 407) {
+                    $category = 'Proxy authentication required'
+                    break
+                }
+                if ($failure -is [System.Net.Http.HttpRequestException] -and $failure.HttpRequestError -eq 'ProxyTunnelError') {
+                    $category = 'Proxy HTTPS tunnel failed'
+                    break
+                }
+                $failure = $failure.InnerException
+            }
+            $remediation = switch -Regex ($category) {
+                'TLS' { 'Confirm the certificate chain and TLS inspection policy with your network team. Use approved trust stores for each tool; do not disable certificate verification.' }
+                'Proxy' { 'Check approved proxy authentication and HTTPS CONNECT access with your network team. Do not place credentials in delivery files.' }
+                'DNS' { 'Check DNS resolution, VPN connectivity, and the configured proxy from this execution environment.' }
+                'timed out' { 'Check outbound TCP 443, the proxy, and service availability. Retry after resolving the connection issue.' }
+                default { 'Check DNS, outbound TCP 443, proxy authentication, certificate trust, and redirect access in this execution environment.' }
+            }
+            New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - $category." $remediation $doc
+        }
+    }
+    New-ALZCheckResult 'Connectivity scope' 'INFO' 'Unauthenticated PowerShell metadata GETs and download HEAD probes only; no tools were installed and no Azure resources were changed.' 'These checks do not verify complete downloads, organization permissions, sovereign cloud endpoints, private state storage, or connectivity from deployed runners. Git, Azure CLI, and Terraform can use different proxy settings and certificate stores.' $doc
+}
+
 function Test-ALZTooling {
     $results = @()
 
@@ -371,4 +490,4 @@ function Test-ALZHcpWorkspace {
     }
 }
 
-Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace
+Export-ModuleMember -Function New-ALZCheckResult, Test-ALZConnectivity, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace

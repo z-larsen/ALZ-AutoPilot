@@ -22,6 +22,8 @@
 # Reset              Start over, ignoring any existing saved state
 # SkipPreflight      Jump straight to config/bootstrap (not recommended)
 # NoClear            Keep existing console output instead of clearing on start
+# ConnectivityOnly   Check public service endpoints, then exit without a delivery
+# ConnectivityTimeoutSeconds  Timeout for each HTTPS connection/read operation
 #
 # Prerequisites:
 # - PowerShell 7.4+, Azure CLI signed in (az login)
@@ -38,7 +40,9 @@ param(
     [string]$DeliveryPath,
     [switch]$Reset,
     [switch]$SkipPreflight,
-    [switch]$NoClear
+    [switch]$NoClear,
+    [switch]$ConnectivityOnly,
+    [ValidateRange(1, 60)][int]$ConnectivityTimeoutSeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +53,7 @@ $modulePath = Join-Path $root 'modules'
 # Single source of truth for the app version. Shown on the splash and stamped into
 # every delivery report, so an artifact can be traced back to the build. Bump it and
 # add a CHANGELOG.md entry with each change.
-$ALZVersion = '1.7.3'
+$ALZVersion = '1.8.0'
 
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force
@@ -59,6 +63,16 @@ Import-Module (Join-Path $modulePath 'ALZConfig.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZOrchestrator.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZPipeline.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZReport.psm1') -Force
+
+if ($ConnectivityOnly) {
+    Write-ALZSection 'Bootstrap connectivity (all supported public services)'
+    $checks = @(Test-ALZConnectivity -Vcs all -IacType bicep -StateBackend hcp -TimeoutSeconds $ConnectivityTimeoutSeconds)
+    Write-ALZResults $checks
+    if (@($checks | Where-Object Status -EQ 'FAIL').Count -gt 0) {
+        throw 'Connectivity checks failed. Resolve the reported connection issues before bootstrap.'
+    }
+    return
+}
 
 if (-not $NoClear) { try { Clear-Host } catch { } }
 Write-ALZSplash -Version $ALZVersion
@@ -134,6 +148,10 @@ if (-not (Test-ALZAnswersComplete -State $state) -or $state.phaseStatus.intervie
     Save-ALZState -State $state
 }
 
+if ($state.answers.iacType -ne 'bicep' -and $state.answers.scenario -ne 'management-only' -and -not $state.answers.networking.scenario) {
+    Invoke-ALZNetworkInterview -State $state -DataPath $dataPath
+}
+
 # Resolve live Azure context and friendly subscription names so the confirmation shows
 # where this is really going, not just the GUIDs that were typed in.
 function Get-ALZConfirmContext {
@@ -188,6 +206,21 @@ if ($runPreflight) {
 
     do {
         $results = @()
+
+        Write-ALZStatus -Status RUN -Message 'Checking bootstrap downloads, Azure endpoints, and proxy connectivity...'
+        $connectivityArgs = @{
+            Vcs = $(if ($state.answers.vcs -eq 'azuredevops') { 'azuredevops' } else { 'github' })
+            IacType = $(if ($state.answers.iacType -eq 'bicep') { 'bicep' } else { 'terraform' })
+            StateBackend = $(if ($state.answers.stateBackend -eq 'hcp') { 'hcp' } else { 'azurerm' })
+            TimeoutSeconds = $ConnectivityTimeoutSeconds
+        }
+        $r = @(Test-ALZConnectivity @connectivityArgs); Write-ALZResults $r; $results += $r
+        if (@($r | Where-Object Status -EQ 'FAIL').Count -gt 0) {
+            Set-ALZPhaseStatus -State $state -Phase 'preflight' -Status 'failed'
+            Write-ALZStatus -Status FAIL -Message 'Connectivity checks failed. No tools will be installed and bootstrap will not run.'
+            if (Read-ALZConfirm -Prompt 'Resolve connectivity and retry these checks?' -Default $false) { continue }
+            return
+        }
 
         Write-ALZStatus -Status RUN -Message 'Checking local tooling (PowerShell 7.4+, Azure CLI, Git)...'
         $r = Test-ALZTooling; Write-ALZResults $r; $results += $r
@@ -279,6 +312,7 @@ Set-ALZCurrentPhase -State $state -Phase 'config'
 Write-ALZProgress -CurrentPhase 'config' -SkipPhases $skip
 Write-ALZSection 'Generating accelerator config'
 $configFolder = Join-Path $DeliveryPath 'config'
+$reviewLibraryPath = Get-ALZCustomLibraryPath -State $state -ConfigFolder $configFolder
 $inputsPath = Write-ALZInputsYaml -State $state -ConfigFolder $configFolder
 Write-ALZStatus -Status OK -Message 'Wrote inputs.yaml' -Detail $inputsPath
 
@@ -290,13 +324,17 @@ else {
     # The platform config is generated from the chosen scenario, then hand-editable. If the
     # scenario changed since it was generated, the existing file is for the old topology.
     $tfvarsExisting = Join-Path $configFolder 'platform-landing-zone.tfvars'
-    if ((Test-Path $tfvarsExisting) -and -not (Test-ALZTfvarsMatchesScenario -TfvarsPath $tfvarsExisting -Scenario $state.answers.scenario -DataPath $dataPath)) {
-        Write-ALZStatus -Status WARN -Message 'The existing platform config does not match the selected scenario.' -Detail 'It was generated for a different topology. Replacing it discards any manual edits.'
-        if (Read-ALZConfirm -Prompt 'Replace it with the selected scenario (discards manual edits)?' -Default $false) {
-            Remove-Item -Path $tfvarsExisting -Force
+    $regenerateConfig = $false
+    $requestedNetworkJson = $state.answers.networking | ConvertTo-Json -Depth 10 -Compress
+    $networkAnswersChanged = $state.answers.networking.Count -gt 0 -and $state.answers.networkSettingsAppliedJson -ne $requestedNetworkJson
+    if ((Test-Path $tfvarsExisting) -and ($networkAnswersChanged -or -not (Test-ALZTfvarsMatchesScenario -TfvarsPath $tfvarsExisting -Scenario $state.answers.scenario -DataPath $dataPath))) {
+        Write-ALZStatus -Status WARN -Message 'The scenario or networking answers differ from the existing platform config.' -Detail 'Regeneration replaces the file and discards manual edits. No keeps the existing file for review.'
+        $regenerateConfig = Read-ALZConfirm -Prompt 'Regenerate from the selected scenario and networking answers (discards manual edits)?' -Default $false
+        if (-not $regenerateConfig) {
+            Write-ALZStatus -Status WARN -Message 'Existing config preserved. New networking answers have not been applied.' -Detail 'Review and reconcile the actual file at the next gate before bootstrap.'
         }
     }
-    $tfvarsPath = Write-ALZStarterTfvars -State $state -ConfigFolder $configFolder -DataPath $dataPath
+    $tfvarsPath = Write-ALZStarterTfvars -State $state -ConfigFolder $configFolder -DataPath $dataPath -Regenerate:$regenerateConfig
     Write-ALZStatus -Status OK -Message "Wrote platform-landing-zone.tfvars ($($state.answers.scenario))" -Detail $tfvarsPath
 
     $fmt = Repair-ALZTfvarsFormat -ConfigFolder $configFolder
@@ -319,6 +357,12 @@ Set-ALZPhaseStatus -State $state -Phase 'config' -Status 'done'
 # a pull request - so this is the last cheap moment to change anything.
 $platformConfigPath = if ($state.answers.iacType -eq 'bicep') { $bicepPath } else { $tfvarsPath }
 Write-ALZSection 'Review the configuration before it is deployed'
+if ($reviewLibraryPath) {
+    Write-ALZStatus -Status INFO -Message 'Custom ALZ library will be included.' -Detail $reviewLibraryPath
+}
+else {
+    Write-ALZStatus -Status INFO -Message 'No custom ALZ library selected.' -Detail "To include custom policies or management groups, add config/lib and stop here, then re-run to regenerate inputs. A worked example is in samples/lib-pci in the app folder."
+}
 Write-Host '  These two files define your platform landing zone:' -ForegroundColor White
 Write-Host "   1. $inputsPath" -ForegroundColor Gray
 Write-Host "   2. $platformConfigPath" -ForegroundColor Gray
@@ -339,6 +383,10 @@ if (-not (Read-ALZConfirm -Prompt 'Configuration reviewed and ready to bootstrap
 }
 
 # ---- Phase: Bootstrap --------------------------------------------------
+if ((Get-ALZCustomLibraryPath -State $state -ConfigFolder $configFolder) -ne $reviewLibraryPath) {
+    Write-ALZStatus -Status WARN -Message 'The custom library changed after config generation.' -Detail 'Stopping before bootstrap. Re-run to include it in inputs.yaml, then review the configuration again.'
+    return
+}
 # Defined before the phase so it survives a resume where the bootstrap is skipped.
 $isAdo = ($state.answers.vcs -eq 'azuredevops')
 Write-ALZProgress -CurrentPhase 'bootstrap' -SkipPhases $skip
@@ -439,8 +487,8 @@ else {
 
 if ($stage2 -eq '2') {
     Show-ALZManualSteps -State $state -DataPath $dataPath
-    Set-ALZCurrentPhase -State $state -Phase 'complete'
-    Write-ALZStatus -Status OK -Message 'Manual runbook printed. Re-run anytime to switch to the guided flow or verify.'
+    Write-ALZStatus -Status INFO -Message 'Manual runbook printed. Pipeline completion has not been verified.'
+    Complete-ALZDelivery -State $state -SessionStart $sessionStart -DataPath $dataPath -AppVersion $ALZVersion
     return
 }
 
@@ -555,25 +603,4 @@ finally { $tok = $null }
 # ---- What happens next + closing summary --------------------------------
 Show-ALZRunSteps -State $state -DataPath $dataPath
 
-Set-ALZCurrentPhase -State $state -Phase 'complete'
-
-# ---- Closing summary ----------------------------------------------------
-$rgNames = @()
-try {
-    $rgNames = @(az group list -o json 2>$null | ConvertFrom-Json | Where-Object { $_.name -like 'rg-alz*' } | ForEach-Object { $_.name } | Sort-Object)
-}
-catch { }
-if (-not $summaryPlatform) {
-    try { $summaryPlatform = Test-ALZPlatformDeployed } catch { }
-}
-Save-ALZState -State $state
-$reportPath = $null
-try { $reportPath = New-ALZDeliveryReport -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -DataPath $dataPath -AppVersion $ALZVersion }
-catch { Write-ALZStatus -Status WARN -Message 'Could not write the HTML report.' -Detail $_.Exception.Message }
-Write-ALZSummary -State $state -Platform $summaryPlatform -Run $summaryRun -ResourceGroups $rgNames -Repo $summaryRepo -SessionStart $sessionStart -ReportPath $reportPath
-
-if ($reportPath -and (Read-ALZConfirm -Prompt 'Open the delivery report now?' -Default $false)) {
-    try { Start-Process $reportPath } catch { Write-ALZStatus -Status WARN -Message 'Could not open the report automatically.' -Detail $reportPath }
-}
-
-Write-ALZStatus -Status OK -Message 'Orchestrator finished. State saved for the next session.'
+Complete-ALZDelivery -State $state -Platform $summaryPlatform -Run $summaryRun -Repo $summaryRepo -SessionStart $sessionStart -DataPath $dataPath -AppVersion $ALZVersion

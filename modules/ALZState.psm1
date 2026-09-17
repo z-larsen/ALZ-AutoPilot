@@ -56,6 +56,9 @@ function New-ALZState {
             hcpWorkspace            = ''
             selfHostedRunners       = $false
             privateNetworking       = $false
+            customLibraryPath       = ''
+            networking              = [ordered]@{}
+            networkSettingsAppliedJson = ''
         }
         phaseStatus     = [ordered]@{
             interview = 'pending'
@@ -161,7 +164,11 @@ function Stop-ALZPhaseTimer {
 function Test-ALZAnswersComplete {
     param([hashtable]$State)
     $a = $State.answers
-    if (-not $a.region -or -not $a.githubOrg -or -not $a.deliveryName) { return $false }
+    if (-not $a.region -or -not $a.deliveryName) { return $false }
+    if ($a.vcs -eq 'azuredevops') {
+        if (-not $a.adoOrg -or -not $a.adoProject) { return $false }
+    }
+    elseif (-not $a.githubOrg) { return $false }
     if (-not $a.subscriptions.management) { return $false }
     if ($a.stateBackend -eq 'hcp' -and (-not $a.hcpOrg -or -not $a.hcpWorkspace)) { return $false }
     return $true

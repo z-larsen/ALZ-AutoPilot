@@ -110,6 +110,8 @@ cd "<path>\ALZAutoPilot"
 | `-Reset` | Start over, ignoring saved answers |
 | `-SkipPreflight` | Jump straight to config and bootstrap. Not recommended |
 | `-NoClear` | Keep existing console output instead of clearing the screen on start |
+| `-ConnectivityOnly` | Check all supported public service endpoints and exit. No delivery files, sign-in, or tool installation required |
+| `-ConnectivityTimeoutSeconds` | Per-connection/read timeout, 1-60 seconds; default 10 |
 
 Answers are saved after every step, so you can stop at any point and re-run to resume.
 
@@ -125,12 +127,17 @@ Every answer is validated as you type (GUIDs, region names, GitHub usernames, em
 
 **Terraform** offers all 11 accelerator scenarios, each showing the accelerator's own scenario number so you can cross-reference the docs. Choosing a multi-region scenario prompts for a second region.
 
-**Bicep** offers the three supported network types (`none`, `hubNetworking`, `vwanConnectivity`) and always collects two regions, because the official Bicep config ships with two. Bicep additionally requires **User Access Administrator at the root (`/`) scope**, which the app calls out during the interview.
+For networked Terraform scenarios, the interview also asks about VPN and ExpressRoute gateways per region, DDoS Network Protection, Azure Firewall versus NVA, the firewall SKU, and supported NAT gateway attachment. Gateway creation does not configure circuits, VPN sites, connections, BGP, or routing. NAT generation is limited to `AzureFirewallSubnet` in hub-and-spoke with Azure Firewall Standard or Premium; it is not generated for Virtual WAN hubs or NVA subnets. StandardV2 and Standard NAT choices produce matching public IP SKUs. Review regional availability and the [networking limits](README.md#platform-networking-choices) before proceeding.
+
+**Bicep integration is preview in this wrapper.** It generates config for `none`, `hubNetworking`, and `vwanConnectivity` and always collects two regions because the bundled config ships with two. End-to-end Bicep deployment has not been validated here. The additional networking interview and Terraform validation checks do not apply to Bicep; review the Bicep parameters manually. Bicep additionally requires **User Access Administrator at the root (`/`) scope**, which the app calls out during the interview.
+
+The interview also accepts an existing custom library folder named `lib`. Leave it blank to detect `config/lib` in the delivery folder automatically.
 
 ### 2. Prerequisites
 
 Each check runs live and prints a remediation panel with the exact fix if it fails:
 
+- HTTPS access to authentication, API, package, registry, and download endpoints, before the remaining checks
 - Local tooling and the ALZ module
 - Azure sign-in and subscription context
 - Owner rights on the platform subscriptions
@@ -141,20 +148,30 @@ Each check runs live and prints a remediation panel with the exact fix if it fai
 
 If anything blocks, fix it and choose to re-run the checks without restarting the app.
 
+To diagnose connectivity without starting a delivery:
+
+```powershell
+.\Start-ALZDelivery.ps1 -ConnectivityOnly
+```
+
+This performs unauthenticated metadata GETs and download HEAD probes. It reports proxy authentication, certificate/TLS, DNS, timeout, and HTTP failures without printing credentials or response bodies. An expected 401 from an authenticated Azure endpoint establishes reachability only, not authorization. A 404 at the Azure DevOps service root also does not verify access to your organization.
+
+Corporate proxies remain [unsupported by the upstream accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/). PowerShell success does not validate Git, Azure CLI, Terraform, full artifact downloads, private state storage, or deployed runners. Have the network team check each tool's proxy authentication and certificate trust. Do not disable TLS verification. A failed probe stops normal preflight before tool installation, resource provider registration, and bootstrap.
+
 ### 3. Generate config
 
 Writes `config/inputs.yaml` and the platform configuration for your chosen topology:
 
-- **Terraform**: `config/platform-landing-zone.tfvars`, generated from the **official** example for that scenario, with regions, Defender contact, and subscription placement filled in.
+- **Terraform**: `config/platform-landing-zone.tfvars`, generated from the **official** example for that scenario, with regions, Defender contact, subscription placement, and the supported networking choices filled in.
 - **Bicep**: `config/platform-landing-zone.yaml`, with regions and `network_type` filled in.
 
 No hand-editing, and no chance of the classic mistake of replacing a `${starter_location_01}` template token instead of setting `starter_locations`.
 
-The file is then yours to edit. On a re-run the app patches only the values the interview owns, so your edits survive. If you change scenario, it detects the mismatch and asks before replacing.
+The file is then yours to edit. On a re-run the app patches regions, the starter contact placeholder, and subscription placement. Changed scenario or networking answers trigger a separate regeneration prompt that defaults to **No**. Yes replaces the config and discards manual edits; No preserves it and leaves you to reconcile the new networking choices during review.
 
 The config is also checked with `terraform fmt`. The accelerator's CI workflow runs `terraform fmt -check` and fails the build on unformatted files, which would block every future pull request, so anything off is corrected here. Formatting is whitespace-only, so it cannot change behaviour.
 
-**Custom library**: if a `config/lib` folder exists (custom management groups, archetypes, policy definitions or assignments), it is detected and passed to the accelerator automatically. See [samples/lib-pci](samples/lib-pci/README.md) for a worked PCI DSS and HIPAA example.
+**Custom library**: the selected `lib` folder, or automatically detected `config/lib`, is shown at the review gate and included in `starter_additional_files`. A missing explicitly selected folder is an error. If the selected path changes or `config/lib` is added after config generation, the app stops before bootstrap so you can regenerate and review the inputs. See [samples/lib-pci](samples/lib-pci/README.md) for a worked PCI DSS and HIPAA example.
 
 ### 4. Bootstrap
 
@@ -169,7 +186,7 @@ The management group hierarchy, ALZ policy assignments, and management resources
 Two options:
 
 1. **Guided in the CLI**: discovers the repo, triggers the workflow, watches the run with a heartbeat, waits through the approval gate, and verifies the result.
-2. **Manual**: prints a step-by-step runbook so you can drive the GitHub UI yourself. Useful when a customer should watch the plan, gate, and apply happen.
+2. **Manual**: prints a step-by-step runbook so you can drive the GitHub or Azure DevOps UI yourself, then writes a handoff report. Azure DevOps always uses this path; its pipeline is not triggered or watched by the app.
 
 ### 6. Summary and report
 
@@ -179,7 +196,7 @@ The detail goes to `<delivery>\reports\alz-delivery-<timestamp>.html`, and you a
 
 One self-contained file, no external references, no credentials. It prints for a closeout deck.
 
-If you stop after the bootstrap, the policy section will say nothing is assigned yet, because policy deploys from the pipeline. Re-run after the pipeline completes to get the full inventory.
+At manual handoff, deployment remains pending and the report shows the observed Azure inventory, which can include pre-existing resources. Counts alone do not establish that this delivery succeeded. If inventory lookup fails, a report is still produced without claiming verification. Early stops before bootstrap and connectivity-only checks do not produce delivery reports.
 
 ---
 
@@ -217,7 +234,7 @@ Re-running is safe. Completed phases are skipped and prompts default to the non-
 | Prompt | Safe answer |
 |---|---|
 | Resume this delivery? | **Y** |
-| Re-run preflight checks? | Either. The checks are read-only |
+| Re-run preflight checks? | The checks are read-only, but decline the separate resource provider registration prompt for a no-write rehearsal |
 | Re-run the bootstrap anyway? | **N** unless you intend to. It recreates repo content and rewrites the federated credentials |
 | Trigger the workflow now? | Either. Terraform is idempotent, so a re-run with no config change is effectively a no-op that still needs approval |
 

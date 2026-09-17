@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.7.3-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -18,25 +18,41 @@ One entry point, a short interview, all prerequisite checks up front with exact 
 | Phase | What happens |
 |---|---|
 | **Plan** | A short interview for the few real decisions; answers saved after every step |
-| **Prereqs** | Live checks: tooling, Azure Owner, resource providers, GitHub PAT/org/Members, HCP |
+| **Prereqs** | Connectivity and download probes first, then tooling, Azure Owner, resource providers, VCS access, and HCP |
 | **Config** | Generates `inputs.yaml` plus the platform config for your chosen scenario (no hand-editing, no token traps) |
-| **Bootstrap** | Runs `Deploy-Accelerator`, verifies the repos got their workflows, translates known errors |
+| **Bootstrap** | Runs `Deploy-Accelerator`, verifies GitHub workflows, and translates known errors. Azure DevOps repository verification remains manual |
 | **Deploy** | Triggers + watches the `02 Continuous Delivery` pipeline, or prints a step-by-step manual runbook |
 
 ## What it supports
 
 | | |
 |---|---|
-| **IaC** | Terraform and Bicep |
+| **IaC** | Terraform; Bicep integration is preview in this wrapper |
 | **Terraform topologies** | All 11 accelerator scenarios: management-only, single/multi region, hub-and-spoke or Virtual WAN, Azure Firewall or NVA, plus the two SMB scenarios |
-| **Bicep topologies** | All three network types: `none`, `hubNetworking`, `vwanConnectivity` |
+| **Platform networking** | Per-region VPN and ExpressRoute gateway choices, DDoS Network Protection, Azure Firewall/NVA selection, firewall SKU, and supported NAT gateway attachment |
+| **Bicep topologies** | Config generation for `none`, `hubNetworking`, and `vwanConnectivity`. End-to-end deployment is not validated here; the additional networking questions are Terraform-only |
 | **State** | Azure Storage (accelerator default) or HCP Terraform, with the HCP migration verified |
 | **Runners** | GitHub-hosted, or self-hosted in a VNet with private networking |
 | **Regions** | Single and multi-region (a second region is collected when the scenario needs one) |
-| **Customization** | A custom ALZ library in `config/lib` is detected and passed through, so custom management groups, archetypes, and policy assignments deploy. See [samples/lib-pci](samples/lib-pci/README.md) |
+| **Customization** | Select an existing `lib` folder in the interview, or use the automatically detected `config/lib`. The selection is shown and rechecked at the review gate. See [samples/lib-pci](samples/lib-pci/README.md) |
 | **Version control** | GitHub end to end. Azure DevOps through config generation and bootstrap, then a printed runbook for stage 2. Local file system is not supported |
 
 The platform config is generated from the **official** scenario file for your choice, then it is yours to edit. Re-runs patch only the values the interview owns (regions, security contact, subscription placement) so hand edits survive.
+
+If networking answers change, the app asks before regenerating an existing Terraform config. The default is **No**: preserve the file and reconcile the new choices manually during review.
+
+### Platform networking choices
+
+| Choice | Generated configuration and limits |
+|---|---|
+| VPN | Create or omit the VPN gateway in each selected region. Configure VPN sites, connections, BGP, and routing separately |
+| ExpressRoute | Create or omit the ExpressRoute gateway in each region. A circuit, peering, and gateway connection are not supplied by this question |
+| DDoS | Create or omit the Network Protection plan. Omitting it also disables the scenario's `Enable-DDoS-VNET` assignments at `connectivity` and `landingzones` |
+| Azure Firewall or NVA | Select the corresponding full-size scenario. NVA appliance deployment, licensing, next-hop addresses, and routing remain manual; SMB scenarios retain their Azure Firewall design |
+| Firewall SKU | Choose Basic, Standard, or Premium and review the resulting design and feature limits |
+| NAT gateway | Optional attachment to `AzureFirewallSubnet` in hub-and-spoke scenarios with Azure Firewall Standard or Premium. Choose StandardV2 or Standard; the generated public IP uses the matching SKU. Virtual WAN hub and NVA subnet NAT are not generated |
+
+Management-only skips these questions. Existing network resources, custom CIDRs, gateway SKUs, scale units, and connection details still require review in the platform config. The published scenario cost estimates are baseline figures, not a price quote for your selected options. Check [NAT gateway integration with Azure Firewall](https://learn.microsoft.com/azure/nat-gateway/tutorial-hub-spoke-nat-firewall) and regional SKU availability before deployment.
 
 ## Safety gates
 
@@ -45,6 +61,7 @@ The platform config is generated from the **official** scenario file for your ch
 | Gate | When | Default |
 |---|---|---|
 | **Confirm target state** | After the interview, before anything runs. Shows tenant, subscriptions by name, topology, regions, runners, and estimated cost | Prompts |
+| **Register resource providers** | Separate opt-in during preflight. This is an Azure write, before the configuration review gate | Prompts; answer No for a read-only rehearsal |
 | **Review configuration** | After config generation, before bootstrap. Offers to open the file, because after bootstrap it lives in the repo and changes go through a pull request | **Stops unless you confirm** |
 | **Run the bootstrap** | Before any Azure resource or repo is created | Prompts |
 | **Trigger the pipeline** | Manual dispatch of the CD workflow. Runs `terraform plan` first | Prompts |
@@ -114,8 +131,22 @@ cd "<path>\ALZAutoPilot"
 - `-Reset` - start over, ignoring saved state.
 - `-SkipPreflight` - jump to config/bootstrap (not recommended).
 - `-NoClear` - keep existing console output instead of clearing the screen on start.
+- `-ConnectivityOnly` - probe all supported public services, then exit without creating delivery files or requiring Azure sign-in.
+- `-ConnectivityTimeoutSeconds` - connection/read timeout for each HTTPS probe, from 1 to 60 seconds; default 10.
 
 Re-running the same command resumes from wherever you left off.
+
+### Connectivity and proxies
+
+```powershell
+.\Start-ALZDelivery.ps1 -ConnectivityOnly
+```
+
+This checks Entra sign-in, Azure Resource Manager, Microsoft Graph, PowerShell Gallery and its download CDN, GitHub source/API/archive/release endpoints, Terraform downloads and registry, Azure DevOps, HCP Terraform, and Bicep release metadata. The bootstrap release probe uses a pinned v7.2.1 sample; it does not select the version that will be installed. Normal preflight selects the applicable services and stops on a failed check before installing the ALZ module or running bootstrap.
+
+The checks distinguish proxy authentication, TLS/certificate failures, DNS errors, timeouts, unexpected response types, and rejected HTTP requests. Proxy values, response bodies, and raw exception messages are not printed. No certificate checks are disabled and no proxy settings are changed.
+
+The accelerator [does not explicitly support corporate proxies](https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/). Passing these unauthenticated PowerShell probes is not proof that Git, Azure CLI, Terraform, full downloads, private storage, or deployed runners will work. Those processes can use different proxy settings and certificate stores. Work with the network team or use an approved execution environment; the upstream guidance suggests a temporary Azure VM when a corporate proxy blocks the local machine.
 
 ## Flow
 
@@ -123,7 +154,7 @@ Re-running the same command resumes from wherever you left off.
 Plan (interview) -> Prerequisites -> Generate config -> Bootstrap -> [HCP state] -> Deploy platform -> Report
 ```
 
-Plan, Prerequisites, Generate config, and Bootstrap are fully automated. The platform deployment can be driven from the CLI (trigger, watch, approve, verify) or printed as a manual runbook so a customer can watch it happen in GitHub. When HCP is selected, the migration steps are printed and then **verified** against the repos before the pipeline runs. Every run ends with an HTML report in the delivery folder.
+Plan, Prerequisites, Generate config, and Bootstrap are guided by the CLI. GitHub platform deployment can be driven from the CLI or handed off as a manual runbook. Azure DevOps uses the manual handoff. The GitHub guided path checks HCP migration readiness against the repos when HCP is selected. Both the guided closing step and the manual handoff write a report; early prerequisite failures and stops before bootstrap do not.
 
 ## Layout
 
@@ -149,13 +180,16 @@ ALZAutoPilot/
     lib-pci/                # custom library example: regulated MG + PCI/HIPAA
   tests/
     Test-ALZConfigConformance.ps1   # offline: generated config vs the accelerator schema
+    ALZAutopilot.Tests.ps1         # mocked reports, networking, library, and connectivity tests
+  .github/workflows/
+    validate.yml                  # Windows/Linux tests and schema validation; no Azure credentials
   CHANGELOG.md              # version history
   .alz-delivery-state.json  # created per delivery folder (not here)
 ```
 
 ## Delivery report
 
-Every run writes `<delivery>\reports\alz-delivery-<timestamp>.html`. The console keeps a short summary and points at it, so the detail lives in a file you can share rather than scrolling past.
+The guided closing step and manual handoff write `<delivery>\reports\alz-delivery-<timestamp>.html`. The console keeps a short summary and points at it. Manual GitHub and Azure DevOps handoffs retain a pending deployment state and show the observed Azure inventory; existing resources do not prove this delivery succeeded. A report is still written if inventory lookup is unavailable.
 
 One self-contained file with inline CSS and no external references: it opens offline, emails cleanly, and prints for a closeout deck. It contains no credentials, and every value is HTML-encoded.
 
@@ -247,8 +281,22 @@ If you pick a different Terraform scenario on a re-run, the tool notices the exi
 |---|---|
 | **Brownfield tenants** | Supported, but not guided. Preflight detects colliding management group names, subscriptions parented elsewhere, and subscriptions that already contain resources, and warns rather than blocks. Adopting an existing hierarchy, landing the baseline in audit-only, and deploying structure without moving subscriptions are all done by editing the platform config at the review gate. See [Brownfield tenants](HOW-TO-USE.md#brownfield-tenants). The interview does require management and connectivity subscription IDs |
 | **Azure DevOps stage 2** | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only |
+| **Bicep integration** | Preview in Autopilot. Config generation and bootstrap delegation are implemented, but end-to-end deployment, Bicep-specific validation, and the extra networking questions are not validated or implemented to Terraform parity |
+| **Corporate proxies** | Diagnostic checks are available; upstream proxy support, per-tool authentication/trust, and runner network access are not guaranteed |
 | **Local file system VCS** | Not supported. Use the accelerator directly |
 | **`bicep-classic`** | Not exposed. Terraform and Bicep only |
+
+## Development checks
+
+The `Validate` workflow runs Pester 5.7.1, PowerShell parser/analyzer error checks, generated Terraform formatting checks, and mandatory schema conformance on Windows and Linux. It downloads the public bootstrap v7.2.1 schema and uses no Azure credentials. Tests mock remote operations; schema validation does not run bootstrap or Terraform apply.
+
+```powershell
+Import-Module Pester -RequiredVersion 5.7.1
+Invoke-Pester ./tests -Output Detailed
+.\tests\Test-ALZConfigConformance.ps1 -ModulesRoot "<extracted-bootstrap>\alz" -RequireSchema
+```
+
+The conformance script can skip missing schemas for an ordinary local run; `-RequireSchema` makes missing GitHub or Azure DevOps schemas fail, as they do in CI.
 
 ## Scope and roadmap
 
