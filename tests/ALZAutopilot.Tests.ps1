@@ -348,6 +348,22 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         }
     }
 
+    It 'identifies a failing Terraform operation without logging sensitive command output' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        Mock terraform {
+            $global:LASTEXITCODE = 1
+            'Error: Provider dependency changes detected. token=fixture-private-value'
+        }
+        $failure = { Invoke-WorkloadCommand -Command terraform -Arguments @('-chdir=private-path', 'init', '-backend=false', '-lockfile=readonly') } | Should -Throw '*terraform init failed*provider lock file*' -PassThru
+        $failure.Exception.Message | Should -Not -Match 'fixture-private-value|private-path'
+        Mock terraform {
+            $global:LASTEXITCODE = 1
+            'Error: something unexpected with a private-state-value'
+        }
+        $failure = { Invoke-WorkloadCommand -Command terraform -Arguments @('plan') } | Should -Throw '*terraform plan failed*Unclassified*' -PassThru
+        $failure.Exception.Message | Should -Not -Match 'private-state-value'
+    }
+
     It 'blocks deletion, replacement, foreign subscription and governance changes in runner plans' {
         . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
         foreach ($change in @(
@@ -368,6 +384,55 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         { Test-WorkloadPlan -Plan @{ resource_changes = @($safe) } -AllowedSubscriptions @('approved') -AllowedResourceGroups @('new') } | Should -Throw '*unapproved resource group*'
         $nested = @{ mode = 'managed'; address = 'azurerm_resource_group_template_deployment.hub'; type = 'azurerm_resource_group_template_deployment'; change = @{ actions = @('create'); after = @{ template_content = '{"resources":[]}' } } }
         { Test-WorkloadPlan -Plan @{ resource_changes = @($nested) } -AllowedSubscriptions @('approved') } | Should -Throw '*pinned template*'
+    }
+
+    It 'verifies normalized ARM JSON against the unchanged pinned source' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $templateFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'pinned-template')).FullName
+        $templatePath = Join-Path $templateFolder 'template.json'
+        Set-Content -LiteralPath $templatePath -Value '{ "resources": [], "contentVersion": "1.0.0.0" }'
+        $approvedHash = (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $change = @{ mode = 'managed'; address = 'azurerm_resource_group_template_deployment.finops'; type = 'azurerm_resource_group_template_deployment'; change = @{ actions = @('create'); after = @{ template_content = '{"contentVersion":"1.0.0.0","resources":[]}' } } }
+        @(Test-WorkloadPlan -Plan @{ resource_changes = @($change) } -AllowedSubscriptions @('approved') -ApprovedTemplateHashes @($approvedHash) -TemplateRoot $templateFolder).Count | Should -Be 1
+        $change.change.after.template_content = '{"contentVersion":"2.0.0.0","resources":[]}'
+        { Test-WorkloadPlan -Plan @{ resource_changes = @($change) } -AllowedSubscriptions @('approved') -ApprovedTemplateHashes @($approvedHash) -TemplateRoot $templateFolder } | Should -Throw '*pinned template*'
+    }
+
+    It 'allows only a pristine initialized new state after checking every target group is absent' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $oldRunnerTemp = $env:RUNNER_TEMP
+        $env:RUNNER_TEMP = $TestDrive
+        $script:stateFixture = @{ version = 4; serial = 0; lineage = '11111111-1111-1111-1111-111111111111'; resources = @(); outputs = @{} }
+        $config = @{ operation = 'new'; bindingId = 'test'; managedResourceGroups = @(@{ subscriptionId = 'approved'; name = 'new-rg' }); backend = @{ storageAccount = 'state'; container = 'tfstate'; key = 'new.tfstate'; subscriptionId = 'approved' } }
+        Mock Invoke-WorkloadCommand {
+            param($Command, $Arguments)
+            if (($Arguments[0..2] -join ' ') -eq 'storage blob exists') { return @{ exists = $true } }
+            if (($Arguments[0..2] -join ' ') -eq 'storage blob download') {
+                $path = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]
+                $script:stateFixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+                return @{}
+            }
+            if (($Arguments[0..1] -join ' ') -eq 'group exists') { return $false }
+            throw 'Unexpected command.'
+        }
+        try {
+            (Read-WorkloadState -Config $config).serial | Should -Be 0
+            Should -Invoke Invoke-WorkloadCommand -Times 1 -Exactly -ParameterFilter { ($Arguments[0..1] -join ' ') -eq 'group exists' }
+            $script:stateFixture.serial = 1
+            (Read-WorkloadState -Config $config).serial | Should -Be 1
+            Should -Invoke Invoke-WorkloadCommand -Times 2 -Exactly -ParameterFilter { ($Arguments[0..1] -join ' ') -eq 'group exists' }
+            $script:stateFixture.serial = 2
+            { Read-WorkloadState -Config $config } | Should -Throw '*not owned by this workload*'
+            $script:stateFixture.serial = 0
+            $script:stateFixture.resources = @(@{ type = 'azurerm_resource_group'; name = 'existing'; mode = 'managed'; instances = @() })
+            { Read-WorkloadState -Config $config } | Should -Throw '*not owned by this workload*'
+            $script:stateFixture.resources = @()
+            Mock Invoke-WorkloadCommand { $true } -ParameterFilter { ($Arguments[0..1] -join ' ') -eq 'group exists' }
+            { Read-WorkloadState -Config $config } | Should -Throw '*scope already exists*'
+            $config.operation = 'update'
+            { Read-WorkloadState -Config $config } | Should -Throw '*not owned by this workload*'
+        }
+        finally { $env:RUNNER_TEMP = $oldRunnerTemp }
     }
 
     It 'publishes only a new feature branch and reuses a saved draft PR on retry' {

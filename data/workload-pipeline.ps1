@@ -5,8 +5,29 @@ param(
 
 function Invoke-WorkloadCommand {
     param([string]$Command, [string[]]$Arguments, [switch]$Json)
+    $operation = if ($Command -eq 'terraform') {
+        @($Arguments | Where-Object { $_ -in @('init', 'validate', 'plan', 'show', 'apply') }) | Select-Object -First 1
+    } else { 'read' }
+    Write-Host "${Stage}: $Command $operation"
     $captured = @(& $Command @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw "$Command failed during $Stage. Output is withheld because plans and state can contain secrets. Reproduce with the same read-only identity for diagnostics." }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $diagnostics = [ordered]@{
+            'checksums|checksum mismatch|Required plugins are not installed' = 'Provider package verification failed.'
+            'Inconsistent dependency lock file|Provider dependency changes detected' = 'The provider lock file does not match the configuration or runner platform.'
+            'Failed to install provider|Failed to query available provider|Could not retrieve the list of available versions' = 'Provider download or version resolution failed.'
+            'Backend initialization required|Backend configuration changed' = 'Terraform backend initialization is required or differs from the configured backend.'
+            'AuthorizationFailed|AuthorizationPermissionMismatch|AuthorizationFailure|403 Forbidden' = 'Authorization or private-backend access was denied.'
+            'Error acquiring the state lock' = 'The Terraform state lock could not be acquired.'
+            'Invalid character|Invalid expression|Invalid function argument|Unsupported argument|Invalid value for' = 'Terraform rejected a configuration argument or expression.'
+        }
+        $category = 'Unclassified command failure.'
+        $outputText = $captured -join "`n"
+        foreach ($diagnostic in $diagnostics.GetEnumerator()) {
+            if ($outputText -match $diagnostic.Key) { $category = $diagnostic.Value; break }
+        }
+        throw "$Command $operation failed during $Stage (exit $exitCode). $category Raw output is withheld because plans and state can contain secrets."
+    }
     if ($Json) {
         try { return ,(($captured -join "`n") | ConvertFrom-Json -AsHashtable -Depth 100 -NoEnumerate -ErrorAction Stop) }
         catch { throw "$Command returned invalid JSON. No environment or state assumption can be made." }
@@ -14,7 +35,7 @@ function Invoke-WorkloadCommand {
 }
 
 function Test-WorkloadPlan {
-    param([System.Collections.IDictionary]$Plan, [string[]]$AllowedSubscriptions, [string[]]$AllowedResourceGroups = @(), [string[]]$ApprovedTemplateHashes = @())
+    param([System.Collections.IDictionary]$Plan, [string[]]$AllowedSubscriptions, [string[]]$AllowedResourceGroups = @(), [string[]]$ApprovedTemplateHashes = @(), [string]$TemplateRoot)
     if ($Plan.errored -or $Plan.complete -eq $false) { throw 'An errored or incomplete Terraform plan cannot be applied.' }
     if ($Plan.configuration.provider_config) {
         foreach ($provider in $Plan.configuration.provider_config.Values) {
@@ -41,10 +62,28 @@ function Test-WorkloadPlan {
         if ($AllowedResourceGroups.Count -gt 0 -and $groupName -and $groupName -notin $AllowedResourceGroups) { throw "A resource targets an unapproved resource group: $($change.address)" }
         if ($change.type -eq 'azurerm_resource_group_template_deployment') {
             $templateHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$($change.change.after.template_content)"))).ToLowerInvariant()
-            if ($templateHash -notin $ApprovedTemplateHashes -or ($change.change.actions -join ',') -ne 'create') { throw 'A nested ARM deployment requires a pinned template and a separate review for updates.' }
+            $verifiedTemplate = $templateHash -in $ApprovedTemplateHashes
+            if (-not $verifiedTemplate -and $TemplateRoot -and $ApprovedTemplateHashes.Count -gt 0) {
+                $plannedTemplate = [Text.Json.Nodes.JsonNode]::Parse([string]$change.change.after.template_content)
+                foreach ($file in Get-ChildItem -LiteralPath $TemplateRoot -Filter '*.json' -Recurse -File) {
+                    if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -notin $ApprovedTemplateHashes) { continue }
+                    $approvedTemplate = [Text.Json.Nodes.JsonNode]::Parse([IO.File]::ReadAllText($file.FullName))
+                    if ([Text.Json.Nodes.JsonNode]::DeepEquals($plannedTemplate, $approvedTemplate)) { $verifiedTemplate = $true; break }
+                }
+            }
+            if (-not $verifiedTemplate -or ($change.change.actions -join ',') -ne 'create') { throw 'A nested ARM deployment requires a pinned template and a separate review for updates.' }
         }
     }
     return @($changes | ForEach-Object { [pscustomobject]@{ Address = $_.address; Actions = $_.change.actions -join ',' } })
+}
+
+function Assert-WorkloadNewScope {
+    param([System.Collections.IDictionary]$Config)
+    if (@($Config.managedResourceGroups).Count -lt 1) { throw 'Explicit resource-group scopes are required for a new workload.' }
+    foreach ($scope in $Config.managedResourceGroups) {
+        $exists = Invoke-WorkloadCommand -Command az -Arguments @('group', 'exists', '--subscription', $scope.subscriptionId, '--name', $scope.name, '--output', 'json', '--only-show-errors') -Json
+        if ($exists -isnot [bool] -or $exists) { throw 'The new workload scope already exists or cannot be inspected. Review ownership/imports before proceeding.' }
+    }
 }
 
 function Read-WorkloadState {
@@ -55,10 +94,7 @@ function Read-WorkloadState {
     if ($existence.exists -isnot [bool]) { throw 'State existence is unknown.' }
     if (-not $existence.exists) {
         if ($Config.operation -ne 'new') { throw 'An existing workload requires its original state. Missing state is not greenfield.' }
-        foreach ($scope in $Config.managedResourceGroups) {
-            $exists = Invoke-WorkloadCommand -Command az -Arguments @('group', 'exists', '--subscription', $scope.subscriptionId, '--name', $scope.name, '--output', 'json', '--only-show-errors') -Json
-            if ($exists -isnot [bool] -or $exists) { throw 'The new workload scope already exists or cannot be inspected. Review ownership/imports before proceeding.' }
-        }
+        Assert-WorkloadNewScope -Config $Config
         return @{ exists = $false; lineage = ''; serial = 0 }
     }
     $tempState = Join-Path $env:RUNNER_TEMP ("state-$([guid]::NewGuid().ToString('N')).json")
@@ -66,8 +102,14 @@ function Read-WorkloadState {
         $null = Invoke-WorkloadCommand -Command az -Arguments (@('storage', 'blob', 'download', '--file', $tempState, '--overwrite', 'true', '--no-progress') + $storageArgs) -Json
         try { $state = Get-Content -LiteralPath $tempState -Raw | ConvertFrom-Json -AsHashtable -Depth 100 -ErrorAction Stop }
         catch { throw 'Terraform state could not be decoded. State content is omitted.' }
-        if ($state.version -ne 4 -or -not $state.lineage) { throw 'Unsupported or empty Terraform state.' }
+        $stateLineage = [guid]::Empty
+        if ($state.version -ne 4 -or -not [guid]::TryParse([string]$state.lineage, [ref]$stateLineage) -or -not $state.Contains('resources') -or -not $state.Contains('outputs') -or $state.serial -isnot [long] -and $state.serial -isnot [int]) { throw 'Unsupported or incomplete Terraform state.' }
         if ($Config.expectedLineage -and $state.lineage -cne $Config.expectedLineage) { throw 'Terraform state lineage does not match the attached deployment.' }
+        Write-Host "State metadata: serial $($state.serial), resource entries $(@($state.resources).Count), outputs $($state.outputs.Count)."
+        if ($Config.operation -eq 'new' -and $state.serial -in @(0, 1) -and @($state.resources).Count -eq 0 -and $state.outputs.Count -eq 0) {
+            Assert-WorkloadNewScope -Config $Config
+            return @{ exists = $true; lineage = $state.lineage; serial = $state.serial }
+        }
         $binding = @($state.resources | Where-Object { $_.type -eq 'terraform_data' -and $_.name -eq 'autopilot_binding' })
         if ($binding.Count -gt 0) {
             $storedBinding = $binding[0].instances[0].attributes.input.value.bindingId
@@ -139,7 +181,7 @@ function Invoke-WorkloadPipeline {
             $null = New-Item -ItemType Directory -Path $artifact
             Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'plan', '-input=false', '-no-color', '-lock-timeout=5m', "-out=$planFile")
             $plan = Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'show', '-json', $planFile) -Json
-            $changes = @(Test-WorkloadPlan -Plan $plan -AllowedSubscriptions $config.allowedSubscriptionIds -AllowedResourceGroups $config.managedResourceGroups.name -ApprovedTemplateHashes $config.approvedTemplateHashes)
+            $changes = @(Test-WorkloadPlan -Plan $plan -AllowedSubscriptions $config.allowedSubscriptionIds -AllowedResourceGroups $config.managedResourceGroups.name -ApprovedTemplateHashes $config.approvedTemplateHashes -TemplateRoot $root)
             $lockHash = ''
             if (Test-Path -LiteralPath $lockFile) {
                 Copy-Item -LiteralPath $lockFile -Destination $artifactLock
@@ -172,7 +214,7 @@ function Invoke-WorkloadPipeline {
             if ($receipt.commit -ne $env:GITHUB_SHA -or $receipt.repository -cne $env:GITHUB_REPOSITORY -or $receipt.bindingId -cne $config.bindingId -or $receipt.manifestHash -cne $manifestHash -or $receipt.planHash -cne (Get-FileHash -LiteralPath $planFile -Algorithm SHA256).Hash) { throw 'The reviewed plan is not bound to this commit, configuration, or state.' }
             if (@($config.approvedTemplateHashes).Count -gt 0 -and $env:AUTOPILOT_TEMPLATE_CONFIRMATION -cne ($config.approvedTemplateHashes -join ',')) { throw 'The nested ARM template requires explicit hash confirmation after review.' }
             $plan = Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'show', '-json', $planFile) -Json
-            $null = Test-WorkloadPlan -Plan $plan -AllowedSubscriptions $config.allowedSubscriptionIds -AllowedResourceGroups $config.managedResourceGroups.name -ApprovedTemplateHashes $config.approvedTemplateHashes
+            $null = Test-WorkloadPlan -Plan $plan -AllowedSubscriptions $config.allowedSubscriptionIds -AllowedResourceGroups $config.managedResourceGroups.name -ApprovedTemplateHashes $config.approvedTemplateHashes -TemplateRoot $root
             Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'apply', '-input=false', '-no-color', '-lock-timeout=5m', '-auto-approve', $planFile)
             'Applied the reviewed saved plan.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
         }
