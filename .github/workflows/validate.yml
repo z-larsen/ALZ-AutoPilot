@@ -36,11 +36,12 @@ jobs:
         run: |
           Install-PSResource -Name Pester -Version 5.7.1 -Scope CurrentUser -TrustRepository -AcceptLicense
           Install-PSResource -Name PSScriptAnalyzer -Version 1.25.0 -Scope CurrentUser -TrustRepository -AcceptLicense
+          Install-PSResource -Name powershell-yaml -Version 0.4.12 -Scope CurrentUser -TrustRepository -AcceptLicense
 
       - name: Parse and analyze PowerShell
         run: |
           Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force
-          $files = @(Get-Item ./Start-ALZDelivery.ps1) + @(Get-ChildItem ./modules,./scripts,./tests -Recurse -File -Include *.ps1,*.psm1)
+          $files = @(Get-Item ./Start-ALZDelivery.ps1) + @(Get-ChildItem ./modules,./scripts,./tests,./data -Recurse -File -Include *.ps1,*.psm1)
           $problems = @()
           foreach ($file in $files) {
               $tokens = $null

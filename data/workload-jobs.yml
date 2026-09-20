@@ -1,0 +1,92 @@
+autopilot-plan:
+  if: inputs.autopilot_configuration != '' && !inputs.autopilot_enable_apply
+  name: Workload plan
+  runs-on: ${{ fromJSON(inputs.autopilot_runner_labels) }}
+  timeout-minutes: 30
+  environment: ${{ inputs.autopilot_plan_environment }}
+  permissions:
+    contents: read
+    id-token: write
+  env:
+    ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+    ARM_SUBSCRIPTION_ID: ${{ inputs.autopilot_target_subscription_id }}
+    ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    ARM_USE_AZUREAD: 'true'
+    ARM_USE_OIDC: 'true'
+    ARM_RESOURCE_PROVIDER_REGISTRATIONS: none
+    AUTOPILOT_CONFIGURATION: ${{ inputs.autopilot_configuration }}
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+        terraform_version: ${{ inputs.terraform_cli_version }}
+    - uses: azure/login@v2
+      with:
+        client-id: ${{ vars.AZURE_CLIENT_ID }}
+        tenant-id: ${{ vars.AZURE_TENANT_ID }}
+        subscription-id: ${{ inputs.autopilot_target_subscription_id }}
+    - name: Validate, discover state, and plan
+      shell: pwsh
+      run: __PLAN_SCRIPT__
+    - uses: actions/upload-artifact@v4
+      with:
+        name: autopilot-plan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .autopilot-plan/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: Clean local plan artifacts
+      if: always()
+      shell: pwsh
+      run: if (Test-Path -LiteralPath .autopilot-plan) { Remove-Item -LiteralPath .autopilot-plan -Recurse -Force }
+autopilot-apply:
+  if: inputs.autopilot_configuration != '' && inputs.autopilot_enable_apply && github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.autopilot_confirmation == inputs.autopilot_target_subscription_id
+  name: Apply reviewed workload plan
+  runs-on: ${{ fromJSON(inputs.autopilot_runner_labels) }}
+  timeout-minutes: 90
+  environment: ${{ inputs.autopilot_apply_environment }}
+  permissions:
+    contents: read
+    id-token: write
+    actions: read
+  env:
+    ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+    ARM_SUBSCRIPTION_ID: ${{ inputs.autopilot_target_subscription_id }}
+    ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    ARM_USE_AZUREAD: 'true'
+    ARM_USE_OIDC: 'true'
+    ARM_RESOURCE_PROVIDER_REGISTRATIONS: none
+    AUTOPILOT_CONFIGURATION: ${{ inputs.autopilot_configuration }}
+    AUTOPILOT_CONFIRMATION: ${{ inputs.autopilot_confirmation }}
+    AUTOPILOT_PLAN_RUN_ID: ${{ inputs.autopilot_plan_run_id }}
+    AUTOPILOT_PLAN_ATTEMPT: ${{ inputs.autopilot_plan_attempt }}
+    AUTOPILOT_TEMPLATE_CONFIRMATION: ${{ inputs.autopilot_template_confirmation }}
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: actions/download-artifact@v4
+      with:
+        name: autopilot-plan-${{ inputs.autopilot_plan_run_id }}-${{ inputs.autopilot_plan_attempt }}
+        path: .autopilot-plan
+        run-id: ${{ inputs.autopilot_plan_run_id }}
+        github-token: ${{ github.token }}
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+        terraform_version: ${{ inputs.terraform_cli_version }}
+    - uses: azure/login@v2
+      with:
+        client-id: ${{ vars.AZURE_CLIENT_ID }}
+        tenant-id: ${{ vars.AZURE_TENANT_ID }}
+        subscription-id: ${{ inputs.autopilot_target_subscription_id }}
+    - name: Verify and apply saved plan
+      shell: pwsh
+      run: __APPLY_SCRIPT__
+    - name: Clean local plan artifacts
+      if: always()
+      shell: pwsh
+      run: if (Test-Path -LiteralPath .autopilot-plan) { Remove-Item -LiteralPath .autopilot-plan -Recurse -Force }

@@ -7,6 +7,21 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.10.0
+
+- Add opt-in draft PR publication for attached workloads and their existing ALZ templates repository. Create feature branches without committing to the default branch, merging, dispatching an apply, or rerunning bootstrap. Retry the same publication without creating a second PR.
+- Generate workload-specific workflow and backend manifests. Keep backend and deployment subscriptions separate and isolate each state key. Exclude new workload changes from legacy ALZ triggers.
+- Extend the official reusable CD workflow through an opt-in input, preserving its path and OIDC trust. Validate private state on the existing runner when local network access is unavailable; do not classify uninspected state as greenfield.
+- Separate planning from apply. Apply requires an explicit default-branch dispatch, a reviewed plan run ID, subscription confirmation, and matching commit/configuration/plan hashes. Block deletion, replacement, imports, governance changes and out-of-scope subscriptions/resource groups. Nested ARM deployments require a pinned template and extra confirmation.
+- Add a read-only-by-default access helper for existing deployment identities. Permission and environment changes require an explicit `-Apply` and confirmation. No runner, network, storage or identity infrastructure is bootstrapped.
+
+## 1.9.0
+
+- Add a new workload / modify existing path that skips bootstrap and asks for custom Terraform, an exact GitHub repository, a repository-relative root, and an existing Azure Storage backend. The platform landing zone path is unchanged.
+- Classify the selected target using read-only Azure inventory and Terraform state. Block updates with missing, empty, inaccessible, or mismatched state. Require a new workload to use an unused folder and state key; existing Azure resources require an ownership/import review. Discovery failures never imply greenfield.
+- Prepare additive changes in a local repository copy for review. Preserve unrelated files, exclude local state and workflow files, pin repository/state identity, and disable the former destructive content-swap path. No remote commits, workflow dispatches, imports, or applies are performed. A plan and review of the workflow's root/backend routing are still required before publishing.
+- Support GitHub and Azure Storage with the default Terraform workspace in this path. Private state requires network access and Storage Blob Data Reader permission; no runners, endpoints, or role assignments are created as a fallback.
+
 ## 1.8.0
 
 - Generate handoff reports for manual GitHub and Azure DevOps paths without marking a pending deployment complete. Label resource counts as observed inventory.

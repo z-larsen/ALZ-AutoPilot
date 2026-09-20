@@ -5,13 +5,27 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.8.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.10.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
 Guided automation for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). It does not change what the accelerator does. It's a guided orchestration layer that reduces process overhead without removing the accelerator's review, approval, and deployment boundaries.
 
 One entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
+
+## Workload updates without another bootstrap
+
+Choose **New workload / modify existing** to attach custom Terraform to an already bootstrapped GitHub repository such as `alz-mgmt`. This path does not run the accelerator, create deployment infrastructure, or replace the ALZ root files.
+
+- Select the exact repository, Terraform root, deployment subscription and existing storage backend. A new workload requires an unused folder and state key. An update requires its original state and verified lineage.
+- Use local read-only discovery, or defer private-state validation to an existing self-hosted runner. A failed or deferred read is never classified as an empty environment.
+- Opt into draft PRs for the workload and its existing templates repo. Merge the templates PR first. The official reusable workflow path stays the same, preserving its OIDC contract, and existing ALZ jobs run only when workload mode is not selected.
+- PRs and pushes plan only. Apply is a separate default-branch dispatch that names the reviewed plan run and confirms the target subscription. The saved plan must match the commit, manifest and backend. Deletions, replacements, imports and management-group changes are blocked; these need a separate migration procedure.
+- Existing environment protection rules remain in force. For private repositories without required-reviewer support, the explicit apply dispatch is the approval boundary. Sensitive plan artifacts are private and retained for one day.
+
+The generated `Initialize-WorkloadAccess.ps1` helper reviews existing identities, roles and environment variables. It is read-only unless explicitly run with `-Apply` and confirmed. It can grant subscription-wide deployment/RBAC permissions for new resource groups, so review its output carefully and narrow those scopes for production. Resource-provider registration and Azure Policy exceptions are not automatic.
+
+Workload automation currently supports private GitHub repositories, existing Linux x64 self-hosted runners, and Azure Storage with the default Terraform workspace. Backend and deployment subscriptions can differ. Budget alerts do not stop Azure consumption; review total projected cost before approving an apply.
 
 ## The journey
 
