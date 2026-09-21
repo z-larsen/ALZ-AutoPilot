@@ -6,6 +6,24 @@ BeforeAll {
 }
 
 Describe 'Workload attachment safety' -Tag 'Workload' {
+    It 'routes operation <Choice> without making an update or migration a bootstrap' -ForEach @(
+        @{ Choice = '1'; Type = 'landingzone'; Intent = 'bootstrap' }
+        @{ Choice = '2'; Type = 'workload'; Intent = 'new-workload' }
+        @{ Choice = '3'; Type = 'workload'; Intent = 'update-workload' }
+        @{ Choice = '4'; Type = 'maintenance'; Intent = 'upgrade-review' }
+        @{ Choice = '5'; Type = 'maintenance'; Intent = 'migration-review' }
+    ) {
+        InModuleScope ALZWorkload -Parameters @{ Choice = $Choice; ExpectedType = $Type; ExpectedIntent = $Intent } {
+            param($Choice, $ExpectedType, $ExpectedIntent)
+            Mock Read-ALZValue { $Choice }
+            Mock Save-ALZState {}
+            $state = @{ answers = @{} }
+            $result = Set-ALZDeliveryType -State $state
+            $result.answers.deliveryType | Should -Be $ExpectedType
+            $result.answers.deliveryIntent | Should -Be $ExpectedIntent
+        }
+    }
+
     It 'never bootstraps or generates placeholder ALZ configuration from workload mode' {
         $definition = (Get-Command Invoke-ALZWorkloadDelivery).Definition
         $definition | Should -Not -Match '\b(Invoke-ALZBootstrap|Write-ALZStarterTfvars|Install-ALZModuleIfNeeded)\b'
@@ -323,6 +341,41 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         }
     }
 
+    It 'preserves custom hooks and workflow files when updating a bound workload' {
+        InModuleScope ALZWorkload -Parameters @{ TestRoot = $TestDrive } {
+            param($TestRoot)
+            $checkout = (New-Item -ItemType Directory -Path (Join-Path $TestRoot 'preserve-hooks') -Force).FullName
+            $state = @{ answers = @{
+                workloadRepository = 'contoso/platform'; workloadRoot = 'workloads/example'; workloadBranch = 'main'; workloadOperation = 'new'
+                subscriptions = @{ management = '22222222-2222-2222-2222-222222222222' }
+                workloadBackend = @{ subscriptionId = '11111111-1111-1111-1111-111111111111'; tenantId = '33333333-3333-3333-3333-333333333333'; storageAccount = 'existingstate'; resourceGroup = 'rg-state'; container = 'tfstate'; key = 'example/terraform.tfstate'; workspace = 'default' }
+                workloadPipeline = @{ planEnvironment = 'platform-plan'; applyEnvironment = 'platform-apply'; terraformVersion = '1.14.9' }
+            } }
+            $files = Write-ALZWorkloadWorkflow -State $state -Checkout $checkout
+            $config = Get-Content -LiteralPath $files.Config -Raw | ConvertFrom-Json -AsHashtable
+            $config.initialization = @{ type = 'finops-v14-private'; script = 'scripts/Initialize-FinOpsHub.ps1'; bundle = 'vendor/finops-hub-v14/initialization.json' }
+            $config.operatorMetadata = @{ owner = 'platform-team'; approval = 'separate-review' }
+            $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $files.Config
+            Add-Content -LiteralPath $files.Workflow -Value '# Operator-maintained workflow extensions'
+            $helperPath = Join-Path $checkout '.github/autopilot/Initialize-WorkloadAccess.ps1'
+            Add-Content -LiteralPath $helperPath -Value '# Operator-maintained access scope'
+            $workflowHash = (Get-FileHash $files.Workflow).Hash
+            $helperHash = (Get-FileHash $helperPath).Hash
+            $state.answers.workloadOperation = 'update'
+            $state.answers.workloadStateLineage = '44444444-4444-4444-4444-444444444444'
+
+            $null = Write-ALZWorkloadWorkflow -State $state -Checkout $checkout
+
+            $updated = Get-Content -LiteralPath $files.Config -Raw | ConvertFrom-Json -AsHashtable
+            $updated.initialization.type | Should -Be 'finops-v14-private'
+            $updated.operatorMetadata.owner | Should -Be 'platform-team'
+            $updated.operation | Should -Be 'update'
+            $updated.expectedLineage | Should -Be $state.answers.workloadStateLineage
+            (Get-FileHash $files.Workflow).Hash | Should -Be $workflowHash
+            (Get-FileHash $helperPath).Hash | Should -Be $helperHash
+        }
+    }
+
     It 'extends the official reusable template without changing legacy job bodies or OIDC workflow path' {
         InModuleScope ALZWorkload -Parameters @{ TestRoot = $TestDrive } {
             param($TestRoot)
@@ -582,6 +635,7 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         $applyIdentity = "/subscriptions/$subscription/resourceGroups/rg-identity/providers/Microsoft.ManagedIdentity/userAssignedIdentities/apply"
         @{
             schemaVersion = 1; repository = 'contoso/platform'; allowedSubscriptionIds = @($subscription)
+            managedResourceGroups = @(@{ subscriptionId = $subscription; name = 'rg-workload' })
             backend = @{ subscriptionId = $subscription; tenantId = $tenant; resourceGroup = 'rg-state'; storageAccount = 'existingstate'; container = 'tfstate' }
             pipeline = @{ templatesRepository = 'contoso/platform-templates'; planEnvironment = 'platform-plan'; applyEnvironment = 'platform-apply' }
         } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $configPath
@@ -590,6 +644,7 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
             $global:LASTEXITCODE = 0
             $script:accessCalls += 'az ' + ($args -join ' ')
             if (($args[0..1] -join ' ') -eq 'account show') { return '{"id":"11111111-1111-1111-1111-111111111111","tenantId":"22222222-2222-2222-2222-222222222222"}' }
+            if (($args[0..1] -join ' ') -eq 'group exists') { return 'true' }
             if (($args[0..1] -join ' ') -eq 'identity show') {
                 $identityId = $args[[array]::IndexOf($args, '--ids') + 1]
                 $mode = $identityId.Split('/')[-1]
@@ -607,6 +662,13 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         $review.Count | Should -BeGreaterThan 0
         ($script:accessCalls -join "`n") | Should -Not -Match '\bcreate\b|--method POST|\bregister\b'
         @($review | Where-Object Present -EQ $false).Count | Should -BeGreaterThan 0
+        @($review | Where-Object { $_.Requirement -eq 'Contributor' -and $_.Scope -eq "/subscriptions/$subscription/resourceGroups/rg-workload" }).Count | Should -Be 1
+        @($review | Where-Object Requirement -EQ 'Role Based Access Control Administrator').Count | Should -Be 0
+        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+        $config.access = @{ applyRoles = @(@{ role = 'Contributor'; scope = "/subscriptions/$subscription" }) }
+        $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath
+        { & (Join-Path $repoRoot 'data/Initialize-WorkloadAccess.ps1') -Configuration $configPath -PlanIdentityResourceId $planIdentity -ApplyIdentityResourceId $applyIdentity -Apply -Confirm:$false } | Should -Throw '*No access writes*'
+        ($script:accessCalls -join "`n") | Should -Not -Match '\bcreate\b|--method POST|\bregister\b'
     }
 
     Context 'Entry point and resume' {
@@ -622,6 +684,8 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
             $state.phaseStatus.interview = 'done'
             Mock Test-ALZTooling -ModuleName ALZWorkload { @() }
             Mock Test-ALZAzureLogin -ModuleName ALZWorkload { @() }
+            Mock Test-ALZWorkloadGitHubSecurity -ModuleName ALZWorkload { @() }
+            Mock Test-ALZWorkloadPipelineAccess -ModuleName ALZWorkload { $true }
             Mock Write-ALZResults -ModuleName ALZWorkload {}
             Mock Write-ALZStatus -ModuleName ALZWorkload {}
             Mock Read-Host -ModuleName ALZWorkload {
@@ -693,6 +757,214 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
             Should -Invoke Invoke-ALZWorkloadInterview -ModuleName ALZWorkload -Times 1 -Exactly
             Should -Invoke Invoke-ALZBootstrap -ModuleName ALZWorkload -Times 0 -Exactly
             $state.phaseStatus.bootstrap | Should -Be 'skipped'
+        }
+
+        It 'does not regenerate shared workflows when preserving an existing attachment' {
+            $state.answers.workloadUsePipeline = $true
+            Mock Read-ALZWorkloadPipeline -ModuleName ALZWorkload { @{} }
+            Mock Write-ALZWorkloadWorkflow -ModuleName ALZWorkload { [pscustomobject]@{ Workflow = 'review-workflow'; Preserved = $true } }
+            Mock Protect-ALZWorkloadLegacyTriggers -ModuleName ALZWorkload { throw 'Must preserve existing triggers' }
+            Mock New-ALZWorkloadTemplateProposal -ModuleName ALZWorkload { throw 'Must not regenerate shared workflow' }
+            Invoke-ALZWorkloadDelivery -State $state
+            $state.phaseStatus.config | Should -Be 'done'
+            Should -Invoke New-ALZWorkloadTemplateProposal -ModuleName ALZWorkload -Times 0 -Exactly
+            Should -Invoke Protect-ALZWorkloadLegacyTriggers -ModuleName ALZWorkload -Times 0 -Exactly
+        }
+    }
+}
+
+Describe 'GitHub security and runner boundaries' -Tag 'Security' {
+    BeforeEach {
+        $protection = @{
+            required_pull_request_reviews = @{ required_approving_review_count = 1; require_code_owner_reviews = $true }
+            required_status_checks = @{ contexts = @('validate') }
+            enforce_admins = @{ enabled = $true }
+            allow_force_pushes = @{ enabled = $false }
+            allow_deletions = @{ enabled = $false }
+        }
+        $snapshot = @{
+            Branch = 'main'
+            Repository = @{ private = $true }
+            Organization = @{ plan = @{ name = 'enterprise' }; two_factor_requirement_enabled = $true; default_repository_permission = 'none'; members_can_create_public_repositories = $false }
+            Protection = $protection
+            TemplateProtection = $protection
+            Actions = @{ default_workflow_permissions = 'read'; can_approve_pull_request_reviews = $false }
+            Environment = @{ deployment_branch_policy = @{ custom_branch_policies = $true }; can_admins_bypass = $false; protection_rules = @(@{ type = 'required_reviewers'; reviewers = @(@{ type = 'Team'; reviewer = @{ id = 1 } }); prevent_self_review = $true }) }
+            EnvironmentBranches = @{ branch_policies = @(@{ name = 'main'; type = 'branch' }) }
+            Unavailable = @()
+        }
+    }
+
+    It 'recognizes configured Enterprise controls without claiming runner isolation' {
+        $findings = @(Get-ALZGitHubSecurityFindings -Snapshot $snapshot -Profile production)
+        @($findings | Where-Object Status -EQ 'FAIL').Count | Should -Be 0
+        ($findings | Where-Object Name -EQ 'Deployment approval capability').Status | Should -Be 'OK'
+    }
+
+    It 'never claims private environment reviewer support on Team' {
+        $snapshot.Organization.plan.name = 'team'
+        foreach ($profile in @('learning', 'production')) {
+            $finding = Get-ALZGitHubSecurityFindings -Snapshot $snapshot -Profile $profile | Where-Object Name -EQ 'Deployment approval capability'
+            $finding.Status | Should -Be $(if ($profile -eq 'production') { 'FAIL' } else { 'WARN' })
+            $finding.Detail | Should -Match 'Manual dispatch is not independent approval'
+        }
+    }
+
+    It 'blocks missing <Control> evidence in production' -ForEach @(
+        @{ Control = 'Organization'; Finding = 'Organization 2FA' }
+        @{ Control = 'Protection'; Finding = 'Workload PR review' }
+        @{ Control = 'TemplateProtection'; Finding = 'Reusable workflow PR review' }
+        @{ Control = 'Actions'; Finding = 'Workflow token defaults' }
+        @{ Control = 'Environment'; Finding = 'Deployment approval capability' }
+        @{ Control = 'EnvironmentBranches'; Finding = 'Apply branch restriction' }
+    ) {
+        $snapshot.Remove($Control)
+        $findings = @(Get-ALZGitHubSecurityFindings -Snapshot $snapshot -Profile production)
+        ($findings | Where-Object Name -EQ $Finding).Status | Should -Be 'FAIL'
+    }
+
+    It 'does not accept a tag or wildcard as the exact apply branch boundary' {
+        $snapshot.EnvironmentBranches.branch_policies[0].type = 'tag'
+        (Get-ALZGitHubSecurityFindings -Snapshot $snapshot | Where-Object Name -EQ 'Apply branch restriction').Status | Should -Be 'FAIL'
+        $snapshot.EnvironmentBranches.branch_policies[0].type = 'branch'
+        $snapshot.EnvironmentBranches.branch_policies[0].name = '*'
+        (Get-ALZGitHubSecurityFindings -Snapshot $snapshot | Where-Object Name -EQ 'Apply branch restriction').Status | Should -Be 'FAIL'
+    }
+
+    It 'reports denied settings without making GitHub writes or exposing credentials' {
+        InModuleScope ALZPreflight {
+            Mock Invoke-RestMethod { throw 'fixture-token must not be displayed' }
+            $findings = @(Test-ALZWorkloadGitHubSecurity -Repository 'contoso/platform' -Branch main -Pipeline @{ templatesRepository = 'contoso/templates'; applyEnvironment = 'apply'; securityProfile = 'production' } -Token 'fixture-token')
+            @($findings | Where-Object Name -Like 'Security evidence:*').Count | Should -BeGreaterThan 0
+            ($findings | ConvertTo-Json -Depth 6) | Should -Not -Match 'fixture-token'
+            Should -Invoke Invoke-RestMethod -Times 0 -Exactly -ParameterFilter { $Method -ne 'Get' }
+        }
+    }
+
+    It 'rejects overlapping plan and apply runner pools in production' {
+        InModuleScope ALZWorkload {
+            $pipeline = @{ securityProfile = 'production'; runnerIsolationReviewed = $true; planRunnerLabels = @('self-hosted', 'plan'); applyRunnerLabels = @('self-hosted', 'apply') }
+            $runners = @(@{ id = 1; status = 'online'; labels = @(@{name='self-hosted'}, @{name='plan'}, @{name='apply'}) })
+            { Test-ALZWorkloadRunnerIsolation -Pipeline $pipeline -Runners $runners } | Should -Throw '*overlap*'
+            $pipeline.securityProfile = 'learning'
+            { Test-ALZWorkloadRunnerIsolation -Pipeline $pipeline -Runners $runners } | Should -Not -Throw
+        }
+    }
+
+    It 'requires disjoint available runners and a separate production isolation review' {
+        InModuleScope ALZWorkload {
+            $pipeline = @{ securityProfile = 'production'; planRunnerLabels = @('self-hosted', 'plan'); applyRunnerLabels = @('self-hosted', 'apply') }
+            $runners = @(
+                @{ id = 1; status = 'online'; labels = @(@{name='self-hosted'}, @{name='plan'}) }
+                @{ id = 2; status = 'online'; labels = @(@{name='self-hosted'}, @{name='apply'}) }
+            )
+            { Test-ALZWorkloadRunnerIsolation -Pipeline $pipeline -Runners $runners } | Should -Throw '*not been reviewed*'
+            $pipeline.runnerIsolationReviewed = $true
+            Test-ALZWorkloadRunnerIsolation -Pipeline $pipeline -Runners $runners | Should -BeTrue
+            $runners[1].status = 'offline'
+            { Test-ALZWorkloadRunnerIsolation -Pipeline $pipeline -Runners $runners } | Should -Throw '*No existing online apply runner*'
+        }
+    }
+
+    It 'loads an existing attachment at its pinned commit without rewriting the caller' {
+        InModuleScope ALZWorkload -Parameters @{ TestRoot = $TestDrive } {
+            param($TestRoot)
+            Import-Module powershell-yaml
+            $state = @{ deliveryPath = $TestRoot; answers = @{
+                workloadRepository='contoso/platform'; workloadRoot='workloads/example'; workloadBranch='main'; workloadOperation='new'; workloadResourceGroup='rg-example'; workloadValidationMode='runner'
+                subscriptions=@{management='22222222-2222-2222-2222-222222222222'}
+                workloadBackend=@{subscriptionId='11111111-1111-1111-1111-111111111111';tenantId='33333333-3333-3333-3333-333333333333';storageAccount='state';resourceGroup='rg-state';container='tfstate';key='example/state';workspace='default'}
+                workloadPipeline=@{templatesRepository='contoso/templates';planEnvironment='plan';applyEnvironment='apply';securityProfile='learning';planRunnerLabels=@('self-hosted','plan');applyRunnerLabels=@('self-hosted','apply')}
+            } }
+            $files = Write-ALZWorkloadWorkflow -State $state -Checkout $TestRoot
+            $script:savedConfig = [IO.File]::ReadAllText($files.Config)
+            $script:savedCaller = [IO.File]::ReadAllText($files.Workflow)
+            $before = (Get-FileHash $files.Workflow).Hash
+            $state.answers.workloadOperation = 'update'
+            $state.answers.workloadStateLineage = '44444444-4444-4444-4444-444444444444'
+            Mock Save-ALZState {}
+            Mock Read-ALZValue { 'learning' }
+            Mock Invoke-RestMethod {
+                param($Uri)
+                $Uri | Should -Match '\?ref=reviewedcommit$'
+                $content = if ($Uri -match '/contents/\.github/autopilot/') { $script:savedConfig } else { $script:savedCaller }
+                @{ encoding='base64'; content=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($content)) }
+            }
+            $pipeline = Read-ALZWorkloadPipeline -State $state -Repository ([pscustomobject]@{Repository='contoso/platform';Commit='reviewedcommit'}) -Token 'fixture-token'
+            $pipeline.templatesRepository | Should -Be 'contoso/templates'
+            $pipeline.planRunnerLabels | Should -Contain 'plan'
+            $pipeline.applyRunnerLabels | Should -Contain 'apply'
+            (Get-FileHash $files.Workflow).Hash | Should -Be $before
+            Should -Invoke Invoke-RestMethod -Times 0 -Exactly -ParameterFilter { $Method -ne 'Get' }
+        }
+    }
+}
+
+Describe 'Advisory official release checks' -Tag 'Versions' {
+    It 'reports newer stable releases without changing local versions or files' {
+        InModuleScope ALZOrchestrator -Parameters @{ TestRoot = $TestDrive } {
+            param($TestRoot)
+            Set-Content (Join-Path $TestRoot '.alz-version-data.json') '{"bootstrapVersion":"v7.2.1","starterVersion":"v17.4.0"}'
+            $before = (Get-FileHash (Join-Path $TestRoot '.alz-version-data.json')).Hash
+            Mock Get-Module { [pscustomobject]@{ Version = [version]'7.1.4' } } -ParameterFilter { $ListAvailable -and $Name -eq 'ALZ' }
+            Mock Invoke-WebRequest {
+                param($Uri)
+                if ($Uri -like '*powershellgallery*') { return @{ Content = '<feed><entry><properties><Version>7.1.5</Version></properties></entry></feed>' } }
+                $version = if ($Uri -like '*bootstrap*') { 'v7.3.0' } else { 'v17.5.1' }
+                return @{ Content = (@{ tag_name = $version; draft = $false; prerelease = $false } | ConvertTo-Json) }
+            }
+            Mock Install-PSResource { throw 'Unexpected installation' }
+            Mock Update-PSResource { throw 'Unexpected upgrade' }
+            $results = @(Get-ALZReleaseStatus -DeliveryPath $TestRoot)
+            $results.Count | Should -Be 4
+            ($results | Where-Object Component -EQ 'Bootstrap').Status | Should -Be 'Newer release available'
+            ($results | Where-Object Component -EQ 'ALZ PowerShell').LatestStable | Should -Be '7.1.5'
+            (Get-FileHash (Join-Path $TestRoot '.alz-version-data.json')).Hash | Should -Be $before
+            Should -Invoke Install-PSResource -Times 0 -Exactly
+            Should -Invoke Update-PSResource -Times 0 -Exactly
+        }
+    }
+
+    It 'treats failed release lookups as unknown, not current or upgrade-required' {
+        InModuleScope ALZOrchestrator {
+            Mock Invoke-WebRequest { throw 'HTTP 429 fixture' }
+            $results = @(Get-ALZReleaseStatus)
+            @($results | Where-Object Status -EQ 'Unavailable; versions unchanged').Count | Should -Be 4
+            @($results | Where-Object LatestStable).Count | Should -Be 0
+        }
+    }
+
+    It 'supports offline checks without network calls' {
+        InModuleScope ALZOrchestrator {
+            Mock Invoke-WebRequest { throw 'Network must not be used' }
+            $results = @(Get-ALZReleaseStatus -SkipOnline)
+            $results.Count | Should -Be 4
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        }
+    }
+
+    It 'keeps an installed package without automatically upgrading it' {
+        InModuleScope ALZOrchestrator {
+            Mock Get-InstalledPSResource { [pscustomobject]@{ Version = '7.1.4' } }
+            Mock Update-PSResource { throw 'Unexpected upgrade' }
+            Mock Install-PSResource { throw 'Unexpected installation' }
+            Install-ALZModuleIfNeeded
+            Should -Invoke Update-PSResource -Times 0 -Exactly
+            Should -Invoke Install-PSResource -Times 0 -Exactly
+        }
+    }
+
+    It 'does not delete state or version metadata when a pinned bootstrap download is incomplete' {
+        InModuleScope ALZOrchestrator -Parameters @{ TestRoot = $TestDrive } {
+            param($TestRoot)
+            $null = New-Item -ItemType Directory -Path "$TestRoot/config", "$TestRoot/bootstrap" -Force
+            Set-Content "$TestRoot/config/inputs.yaml" 'reviewed: true'
+            Set-Content "$TestRoot/.alz-version-data.json" '{"bootstrapVersion":"v7.2.1"}'
+            Set-Content "$TestRoot/bootstrap/terraform.tfstate" 'state fixture that must remain'
+            $state = @{ deliveryPath=$TestRoot; answers=@{vcs='github';iacType='terraform'} }
+            { Invoke-ALZBootstrap -State $state } | Should -Throw '*no delivery files were deleted*'
+            Get-Content "$TestRoot/bootstrap/terraform.tfstate" | Should -Be 'state fixture that must remain'
+            Test-Path "$TestRoot/.alz-version-data.json" | Should -BeTrue
         }
     }
 }

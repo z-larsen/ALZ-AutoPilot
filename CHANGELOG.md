@@ -7,6 +7,16 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.11.0
+
+- Add a read-only official-release notice before delivery selection and an offline `-SkipUpdateCheck` option. Distinguish the installed ALZ PowerShell package, cached bootstrap/starter releases and repository-owned module/provider pins. Keep installed versions; missing packages require explicit exact-version installation approval.
+- Separate bootstrap, new workload, ordinary workload update, module-upgrade review and migration review. Upgrade/migration paths do not deploy, import, move state or change module pins. Stop incomplete bootstrap recovery without deleting version metadata or state folders.
+- Preserve an existing attachment's caller workflow, access helper, initialization hooks, unknown manifest fields and shared template during an ordinary update. Verify the exact repository/root/backend/lineage; reject unbound or mismatched updates rather than overwriting them.
+- Add read-only, plan-aware GitHub security preflight. Production blocks missing or unverifiable controls; explicit learning mode warns without claiming independent deployment approval. Correct GitHub Team private-environment reviewer guidance.
+- Add separate plan/apply runner selectors, paginated runner discovery, overlap checks and distinct identity checks. Require an explicit external isolation review for production; do not claim labels prove clean ephemeral hosts or automatically provision runners.
+- Default apply permissions to named existing resource groups, with no automatic RBAC Administrator. Require reviewed explicit roles and an additional opt-in for subscription-level grants. Finish discovery before making approved writes; preserve existing conditional grants.
+- Rewrite the how-to guide around the five delivery operations, with prerequisites, numbered procedures, expected results, and manual GitHub/Terraform alternatives. Add platform topology selection, initialization recovery, and accurate security and state-handling guidance.
+
 ## 1.10.0
 
 - Add opt-in draft PR publication for attached workloads and their existing ALZ templates repository. Create feature branches without committing to the default branch, merging, dispatching an apply, or rerunning bootstrap. Retry the same publication without creating a second PR.

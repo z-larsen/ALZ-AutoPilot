@@ -42,6 +42,7 @@ param(
     [switch]$SkipPreflight,
     [switch]$NoClear,
     [switch]$ConnectivityOnly,
+    [switch]$SkipUpdateCheck,
     [ValidateRange(1, 60)][int]$ConnectivityTimeoutSeconds = 10
 )
 
@@ -53,7 +54,7 @@ $modulePath = Join-Path $root 'modules'
 # Single source of truth for the app version. Shown on the splash and stamped into
 # every delivery report, so an artifact can be traced back to the build. Bump it and
 # add a CHANGELOG.md entry with each change.
-$ALZVersion = '1.10.0'
+$ALZVersion = '1.11.0'
 
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force
@@ -117,6 +118,8 @@ else {
     Write-ALZStatus -Status INFO -Message "Using delivery folder: $DeliveryPath"
 }
 
+Show-ALZReleaseStatus -DeliveryPath $DeliveryPath -SkipOnline:$SkipUpdateCheck
+
 # ---- Load or initialize state ------------------------------------------
 $state = $null
 if (-not $Reset) { $state = Get-ALZState -DeliveryPath $DeliveryPath }
@@ -157,6 +160,10 @@ Save-ALZState -State $state
 # delivery (see modules/ALZWorkload.psm1).
 if ($state.answers.deliveryType -eq 'workload') {
     Invoke-ALZWorkloadDelivery -State $state -DataPath $dataPath
+    return
+}
+if ($state.answers.deliveryType -eq 'maintenance') {
+    Show-ALZMaintenanceReview -State $state
     return
 }
 

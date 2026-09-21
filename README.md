@@ -5,35 +5,84 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.11.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
-Guided automation for the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). It does not change what the accelerator does. It's a guided orchestration layer that reduces process overhead without removing the accelerator's review, approval, and deployment boundaries.
+ALZ Autopilot guides platform bootstrap through the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/) and prepares workload changes in existing GitHub repositories. It keeps configuration review, deployment approval, and state ownership explicit.
 
-One entry point, a short interview, all prerequisite checks up front with exact fixes, generated config (no hand-editing scattered files), an automated (or guided-manual) platform deployment, and clean resume after an interrupted run.
+Start with the [scenario guide](HOW-TO-USE.md) for step-by-step instructions. Use this README for supported features, boundaries, and development checks.
+
+## Choose an operation
+
+AutoPilot is a delivery companion, not a prerequisite for operating the resulting repositories. The source code, backend binding, workflow and approval rules remain in standard GitHub and Terraform artifacts.
+
+| Operation | Boundary |
+|---|---|
+| [Bootstrap a new platform](HOW-TO-USE.md#1-bootstrap-a-new-platform) | Configure delivery infrastructure and platform deployment. Do not use it to add resources to an existing workload. |
+| [Attach a new workload](HOW-TO-USE.md#2-attach-a-new-workload) | Select an unused Terraform root and state key. Reuse existing repositories, runners, and state storage. |
+| [Update an attached workload](HOW-TO-USE.md#3-update-an-attached-workload) | Keep the exact root, backend, and state lineage. Preserve custom manifest fields, initialization hooks, the caller workflow, access helper, and reusable template. |
+| [Review module upgrades](HOW-TO-USE.md#4-review-module-upgrades) | Inspect release information and the local module cache, then follow a separate PR-based upgrade procedure. No module pins are edited. |
+| [Review a migration or import](HOW-TO-USE.md#5-review-a-migration-or-import) | Review ownership, backups, and the migration procedure. No imports, state commands, or bootstrap are executed. |
+
+A new Azure resource can be an ordinary update to an existing Terraform root. It does not automatically need a new state or bootstrap. Existing platform changes still go through the platform repository's reviewed pipeline; do not create a second platform delivery to make an update.
+
+## Official release checks
+
+Before operation selection, AutoPilot checks the official ALZ PowerShell package, bootstrap modules and Terraform/Bicep starter releases. These unauthenticated metadata requests have bounded timeouts. An unavailable feed is reported as unknown, not as current or as a deployment blocker. Use `-SkipUpdateCheck` for offline operation. No package, module, lock file or state is upgraded by the check.
+
+| Version layer | How to handle changes |
+|---|---|
+| ALZ PowerShell package | Tool used for bootstrap. Keep installed versions; if missing, explicitly approve an exact stable version to install. |
+| Bootstrap and starter packages | Delivery-generation components. Cached versions are not proof of deployed module versions. Review their release notes separately. |
+| ALZ Terraform modules | Inspect the selected repository's module source/version pins and upstream upgrade notes. Upgrade in a dedicated PR, not while adding an unrelated workload. |
+| Terraform providers and CLI | Review source constraints, workflow CLI version and provider lock together. The provider lock does not lock Terraform module versions. |
+
+For an existing deployment, preserve the backend and resource addresses, change a small dependency set on a feature branch, run validation and a fresh plan, review policy changes/replacements, test, then approve deployment. A new starter release is not a reason to rerun bootstrap. Incomplete pinned bootstrap downloads now stop for recovery without deleting delivery folders or Terraform state.
 
 ## Workload updates without another bootstrap
 
-Choose **New workload / modify existing** to attach custom Terraform to an already bootstrapped GitHub repository such as `alz-mgmt`. This path does not run the accelerator, create deployment infrastructure, or replace the ALZ root files.
+Choose **Attach a new workload** or **Update an attached workload** to use an already bootstrapped private GitHub repository. These paths do not run the accelerator, create delivery infrastructure or replace ALZ root files. Legacy saved workload interviews retain their existing operation selection.
 
 - Select the exact repository, Terraform root, deployment subscription and existing storage backend. A new workload requires an unused folder and state key. An update requires its original state and verified lineage.
 - Use local read-only discovery, or defer private-state validation to an existing self-hosted runner. A failed or deferred read is never classified as an empty environment.
-- Opt into draft PRs for the workload and its existing templates repo. Merge the templates PR first. The official reusable workflow path stays the same, preserving its OIDC contract, and existing ALZ jobs run only when workload mode is not selected.
+- Opt into draft PRs for a new workload and its existing templates repo. Review and merge any necessary templates PR first. Ordinary attached-workload updates preserve both caller and reusable workflow; workflow upgrades need their own PR. The official reusable workflow path and OIDC contract stay unchanged.
 - PRs and pushes plan only. Apply is a separate default-branch dispatch that names the reviewed plan run and confirms the target subscription. The saved plan must match the commit, manifest and backend. Deletions, replacements, imports and management-group changes are blocked; these need a separate migration procedure.
-- Existing environment protection rules remain in force. For private repositories without required-reviewer support, the explicit apply dispatch is the approval boundary. Sensitive plan artifacts are private and retained for one day.
+- Existing environment protection rules remain in force. Explicit dispatch is intentional execution, not independent approval. GitHub Team does not support required deployment reviewers for private repositories. Sensitive plan artifacts are private and retained for one day.
 
-The generated `Initialize-WorkloadAccess.ps1` helper reviews existing identities, roles and environment variables. It is read-only unless explicitly run with `-Apply` and confirmed. It can grant subscription-wide deployment/RBAC permissions for new resource groups, so review its output carefully and narrow those scopes for production. Resource-provider registration and Azure Policy exceptions are not automatic.
+Updates inspect the existing manifest and caller at the discovered commit. They retain unknown manifest fields and operator hooks. A missing manifest, changed backend/root, mismatched lineage or unsupported caller contract stops for manual onboarding or migration review. The app does not regenerate a bespoke workflow to make it fit. A runner-based update needs an expected lineage from a prior successful run; the private runner must verify it before planning.
+
+### Security review profiles
+
+Pipeline onboarding defaults to `production`. The read-only preflight checks private visibility, organization 2FA/base permissions, public-repository creation, required reviews/checks and history protection for both workload and templates repositories, workflow-token defaults, and the actual apply environment's exact branch and reviewer rules. Unknown or denied evidence is not a pass. Classic branch-protection APIs are inspected; equivalent rulesets need a separate review if those APIs do not describe the enforced configuration.
+
+The explicit `learning` profile reports these gaps as warnings, except that workload repositories must still be private and basic runner/identity access must work. It does not manufacture an approval gate or change organization settings. Security snapshots are point-in-time evidence, not enforcement against future drift; GitHub and Azure must enforce the real boundaries.
+
+### Runner boundaries
+
+New callers select plan and apply runners separately, with default labels `self-hosted,Linux,X64,alz-plan` and `self-hosted,Linux,X64,alz-apply`. Preflight enumerates all visible runners, requires online matches and rejects overlapping runner IDs in production. The environments must also use different Azure client IDs. Existing callers without stage-specific labels retain their legacy routing and are assessed as configured; an ordinary update does not rewrite them.
+
+Labels are not a security sandbox. Production requires a separate platform-owner review of clean disposable hosts, runner-group/workflow restrictions, network isolation and no shared privileged host identity. `runnerIsolationReviewed` records that acknowledgment; it is not automatic attestation. AutoPilot does not create, re-register, relabel or destroy runners. Provision that boundary through a separately reviewed platform change before selecting production mode.
+
+### Scoped access setup
+
+The generated [Initialize-WorkloadAccess.ps1](data/Initialize-WorkloadAccess.ps1) is read-only unless explicitly run with `-Apply` and confirmed. Its defaults are Reader for planning on approved subscriptions, Contributor for applying in the named existing resource groups, and container-scoped backend access for state and locking. RBAC Administrator is no longer an automatic grant. Broader existing access is not automatically revoked.
+
+For explicit exceptions, review `access.applyRoles` entries in the workload manifest. Each entry contains `role` and an exact `scope` within an approved subscription. Role-assignment administration must be explicitly listed at the smallest required scope. Owner and management-group grants are rejected. Subscription-level apply entries additionally require `-AllowSubscriptionScope`; it is not a substitute for manifest review. All identity, scope and OIDC checks finish before approved writes begin, and conditional grants are never silently replaced with unconditional grants.
+
+Resource-group permissions cannot create a resource group that does not exist. A new-state workflow that creates its groups therefore needs separately approved, explicit subscription-level permissions, or a separately reviewed onboarding design for pre-created groups. The app does not classify an existing group as greenfield to bypass this boundary. Resource-provider registration, imports, policy exceptions and privilege elevation are not automatic.
 
 Workload automation currently supports private GitHub repositories, existing Linux x64 self-hosted runners, and Azure Storage with the default Terraform workspace. Backend and deployment subscriptions can differ. Budget alerts do not stop Azure consumption; review total projected cost before approving an apply.
 
-## The journey
+## Platform delivery phases
+
+These phases apply to platform bootstrap. Workload attachment and review-only operations follow the separate procedures in the scenario guide.
 
 | Phase | What happens |
 |---|---|
 | **Plan** | A short interview for the few real decisions; answers saved after every step |
-| **Prereqs** | Connectivity and download probes first, then tooling, Azure Owner, resource providers, VCS access, and HCP |
-| **Config** | Generates `inputs.yaml` plus the platform config for your chosen scenario (no hand-editing, no token traps) |
+| **Prerequisites** | Check connectivity, tooling, Azure access, resource providers, version control access, and HCP Terraform when selected. |
+| **Configuration** | Generate bootstrap inputs and the selected platform configuration for review. |
 | **Bootstrap** | Runs `Deploy-Accelerator`, verifies GitHub workflows, and translates known errors. Azure DevOps repository verification remains manual |
 | **Deploy** | Triggers + watches the `02 Continuous Delivery` pipeline, or prints a step-by-step manual runbook |
 
@@ -70,7 +119,7 @@ Management-only skips these questions. Existing network resources, custom CIDRs,
 
 ## Safety gates
 
-"One command" means one entry point, not unattended deployment. Every gate the accelerator builds in is preserved, and the tool adds one of its own. Nothing reaches Azure without a human saying yes.
+The app separates discovery, proposal publication, bootstrap, and deployment. These platform prompts do not replace GitHub approval rules or Azure permissions. Verify the actual controls before each delivery.
 
 | Gate | When | Default |
 |---|---|---|
@@ -79,9 +128,9 @@ Management-only skips these questions. Existing network resources, custom CIDRs,
 | **Review configuration** | After config generation, before bootstrap. Offers to open the file, because after bootstrap it lives in the repo and changes go through a pull request | **Stops unless you confirm** |
 | **Run the bootstrap** | Before any Azure resource or repo is created | Prompts |
 | **Trigger the pipeline** | Manual dispatch of the CD workflow. Runs `terraform plan` first | Prompts |
-| **Apply approval** | The accelerator's own GitHub environment gate, created from your `apply_approvers` | **Enforced by GitHub** |
+| **Apply approval** | The accelerator's GitHub environment gate, when supported by the repository's plan and actually configured | Verify the real rules; manual dispatch alone is not independent review |
 
-On the apply gate specifically: this tool **cannot** bypass it. The gate is a GitHub deployment environment, enforced server-side. The tool detects the pending approval and waits. It will only submit an approval on your behalf if you explicitly opt in at a prompt that **defaults to No**, and that call fails unless you are a named reviewer. Approving in the browser is the normal path, and the tool keeps watching while you do it.
+When a supported environment gate exists, GitHub enforces it server-side. The tool detects pending approval and waits. It only submits an approval on your behalf after an explicit opt-in that defaults to No, and GitHub must authorize your account. The presence of an environment does not prove reviewers, self-review prevention or bypass restrictions are configured.
 
 The accelerator's documented requirement to review the platform configuration before deploying is respected. The tool fills in the values that are usually hand-edited (regions, security contact, subscription placement) so the classic placeholder mistakes cannot happen, and then still stops and asks you to review the file before the bootstrap.
 
@@ -92,8 +141,8 @@ The accelerator's documented requirement to review the platform configuration be
 | Steps spread across a wizard, two web UIs, and several doc pages | One `Start-ALZDelivery.ps1` entry point |
 | Errors surface as Terraform stack traces mid-apply | Preflight validates tooling, Azure Owner, resource providers, GitHub PAT/org/Members, and HCP **before** bootstrap |
 | Pointing a greenfield tool at a tenant that is already in use | Preflight detects an existing hierarchy, subscriptions parented elsewhere, and subscriptions that already contain resources |
-| A closed terminal means spelunking through `output/` | State saved after every step; re-run resumes automatically |
-| Hand-edit `inputs.yaml` and dodge `${starter_location_01}` token traps | Config generated from your answers |
+| An interrupted session loses delivery context | Saved answers and phase status support a reviewed resume. |
+| Manual bootstrap inputs are inconsistent | Generate inputs from the interview and preserve the starter template tokens. |
 | Cryptic failures (RP timeout, SSO, backend-config, TF_TOKEN, missing Workflows/Members scope) | Known failures matched to plain-language remediation |
 | An unformatted config fails `terraform fmt -check` in CI, blocking every future pull request | The generated config is fmt-checked and corrected before the bootstrap |
 | "Bootstrap succeeded" but the repos are empty | Post-bootstrap check verifies the repos actually received the workflows |
@@ -103,7 +152,9 @@ The accelerator's documented requirement to review the platform configuration be
 
 ## GitHub plan note
 
-The accelerator ties its approval gate and Azure-auth config to GitHub **environments**, which on a **free org only work on public repos** - so a free org gets **public** repos (fine for a rehearsal; nothing sensitive is exposed). A **Team/Enterprise/EMU** org gets **private** repos with the gate intact. The app works with both and warns you in preflight when the org is free.
+The accelerator uses GitHub **environments** for Azure authentication and deployment controls. GitHub Team supports environments, secrets and deployment-branch restrictions in private repositories, but **required deployment reviewers for private repositories require Enterprise**. Enterprise availability does not prove the gate is enabled: inspect the actual environment rules. Secret Protection and Code Security are separate products, not automatically included with an Enterprise upgrade.
+
+Free organizations may receive public accelerator repositories. Do not assume generated configuration is safe to publish. Workload attachment requires private repositories; a public bootstrap rehearsal must contain no sensitive configuration, state, plans or credentials. See [GitHub environment feature availability](https://docs.github.com/en/actions/reference/deployments-and-environments) and the [official accelerator components](https://azure.github.io/Azure-Landing-Zones/accelerator/).
 
 ### Public repos and self-hosted runners
 
@@ -111,21 +162,23 @@ If you take the free org **and** enable self-hosted runners for private networki
 
 > We recommend that you only use self-hosted runners with private repositories. This is because forks of your public repository can potentially run dangerous code on your self-hosted runner machine by creating a pull request that executes the code in a workflow.
 
-Preflight warns when it detects both. Mitigate by setting Settings > Actions > **"Require approval for all external contributors"**, or remove the exposure entirely with a paid org and private repos.
+Preflight warns when it detects both. External-contributor approval and private repository visibility do not provide runner isolation. Do not execute untrusted PR code on persistent machines with deployment credentials or sensitive network access; use clean, separately governed execution pools.
 
 ### Moving to private repos later
 
 Repos start public on a free org. To convert them afterwards:
 
-1. **Upgrade the org to Team first.** Private repos are free, but *environments* on private repos are not. Converting while still on Free silently ignores protection rules, and because the federated credential subjects are environment-scoped (`...:environment:alz-mgmt-apply:...`), Azure then rejects the OIDC token and the pipeline fails to authenticate. The symptom is `AADSTS700213`, which looks nothing like a billing problem.
-2. **Convert the module repo (`<name>`) to private.** A private caller can still call a public reusable workflow, so nothing breaks yet.
-3. **Convert the templates repo (`<name>-templates`) to private.**
-4. **Set its Actions access policy immediately**: templates repo > Settings > Actions > **General** > *Access* > "Accessible from repositories in the organization". Without it the caller cannot resolve the reusable workflow, and the error does not look like a permissions problem.
-5. **Verify**: run `02 Continuous Delivery` and confirm it plans, reaches the approval gate, and applies.
+1. Confirm that your GitHub plan supports the required private-repository controls. Team supports private environments; independent environment reviewers require Enterprise. Free private repositories do not provide the environment controls this workflow depends on.
+2. Change the module repository to private. Review collaborators, token access, and dependent workflows.
+3. Change the templates repository to private.
+4. In the templates repository, open **Settings > Actions > General > Access** and allow access from the intended organization repositories. Verify that the caller can resolve the private reusable workflow.
+5. **Verify without deploying**: confirm visibility, reusable-workflow access, OIDC configuration and plan execution. Inspect which approval rules your plan supports and what is actually configured. Only approve an apply after a separate plan review.
 
-Simpler alternative: leave the **templates** repo public. A private caller calling a public reusable workflow needs no access policy, and that repo holds workflow logic rather than your tenant identifiers.
+Keep workload and shared workflow repositories private unless their contents and publication risks have been reviewed. A templates repository is part of the deployment trust boundary, not inherently safe to publish.
 
 ## Requirements
+
+The following permissions describe platform bootstrap. Workload attachment reuses existing delivery resources and follows the [operation-specific prerequisites](HOW-TO-USE.md#check-access-for-the-selected-operation).
 
 - PowerShell 7.4+
 - Azure CLI 2.55+ signed in (`az login`)
@@ -137,18 +190,20 @@ Simpler alternative: leave the **templates** repo public. A private caller calli
 ## Usage
 
 ```powershell
-cd "<path>\ALZAutoPilot"
-.\Start-ALZDelivery.ps1 -DeliveryPath "C:\Users\<you>\Documents\ALZ"
+.\Start-ALZDelivery.ps1 -DeliveryPath "$HOME\Documents\ALZ-Platform" -NoClear
 ```
 
+Run the command from the ALZ Autopilot repository. The delivery folder's parent must exist and must not be cloud-synced.
+
 - `-DeliveryPath` - root folder for this delivery's `config/`, `output/`, and saved state. If omitted, you're prompted. Use a plain local path, not a cloud-synced folder.
-- `-Reset` - start over, ignoring saved state.
+- `-Reset` - ignore saved app answers. This does not reset or recover Terraform state. Do not use it to recover an interrupted deployment.
 - `-SkipPreflight` - jump to config/bootstrap (not recommended).
 - `-NoClear` - keep existing console output instead of clearing the screen on start.
+- `-SkipUpdateCheck` - skip online official-release metadata lookups; keep installed versions and local version records unchanged.
 - `-ConnectivityOnly` - probe all supported public services, then exit without creating delivery files or requiring Azure sign-in.
 - `-ConnectivityTimeoutSeconds` - connection/read timeout for each HTTPS probe, from 1 to 60 seconds; default 10.
 
-Re-running the same command resumes from wherever you left off.
+Reusing the delivery folder offers to resume its saved operation. Review what completed and what changed before approving another action.
 
 ### Connectivity and proxies
 
@@ -184,6 +239,7 @@ ALZAutoPilot/
     ALZOrchestrator.psm1    # Deploy-Accelerator wrapper + error translation
     ALZPipeline.psm1        # pipeline trigger/watch/verify + HCP readiness checks
     ALZReport.psm1          # HTML delivery report
+    ALZWorkload.psm1        # workload attachment, preserved updates, and review-only operations
   data/
     providers.json          # ALZ-recommended resource providers
     scenarios.json          # Terraform scenario catalog
@@ -270,7 +326,7 @@ Values that are normally hand-edited are filled in for you. On a re-run only reg
 | **Bicep** | `platform-landing-zone.yaml`, plus the generated Bicep in the module repo. Also requires User Access Administrator at the root (`/`) scope |
 | **GitHub** | Branch protection, environment reviewers, and repo settings in the GitHub UI |
 | **Azure DevOps** | Approvals and checks on the Apply environment, and the service connection, in the Azure DevOps UI |
-| **Scenario / network type** | Changing topology later means replacing the platform config with another scenario and letting the pipeline apply the difference |
+| **Scenario or network type** | Treat a topology change as an architecture review. Compare configurations, dependencies, resource addresses, and replacement risks before preparing a migration or deployment PR. |
 | **Multi-region** | Extend `starter_locations`. A real multi-entry list is never shrunk on a re-run |
 | **HCP Terraform** | The `cloud {}` block, the `TF_TOKEN_app_terraform_io` secret, removing `-backend-config` flags, and `secrets: inherit`. Eight live checks tell you which is still wrong |
 | **Self-hosted runners** | Needs a second PAT at bootstrap. Address space and subnet prefixes are bootstrap module variables if the defaults collide |
@@ -280,20 +336,19 @@ If you pick a different Terraform scenario on a re-run, the tool notices the exi
 
 ## Security
 
-- **Secrets never persisted.** The GitHub PAT and HCP token are read with `Read-Host -AsSecureString`, converted to plaintext only in-memory, and never written to `inputs.yaml` or the state file. `inputs.yaml` references the PAT via the `TF_VAR_github_personal_access_token` environment variable, matching the accelerator's own pattern.
-- **Unmanaged memory freed.** `ConvertTo-ALZPlainText` frees the `BSTR` (`ZeroFreeBSTR`) immediately after copying, so the plaintext does not linger in unmanaged memory.
-- **Env var scoped to the run.** `TF_VAR_github_personal_access_token` is set only for the bootstrap and cleared in a `finally` block.
-- **Transcript scrubbing.** The bootstrap transcript is scanned and any token occurrence is redacted (or the file removed) before it is left on disk.
-- **Injection defense.** Interview inputs are validated (region, GUIDs, org, management group ID, approver usernames), values are sanitized when written to `inputs.yaml` so a tampered state file cannot inject YAML, and user-supplied values used in API paths are URL-encoded.
-- **TLS enforced.** GitHub and HCP API calls use HTTPS with default certificate validation (no `-SkipCertificateCheck`).
-- **No dynamic code execution.** No `Invoke-Expression`, no remote code download. Every Azure CLI argument is a validated GUID or an app constant.
-- **Requires PowerShell 7.4+** and refuses to run under Windows PowerShell 5.1.
+- **Prompted credentials:** Tokens are entered through hidden prompts and used in memory or process-scoped environment variables. AutoPilot does not intentionally write them into its answer file or bootstrap inputs.
+- **Credential cleanup:** Bootstrap token variables are cleared in a `finally` block. The conversion helper releases its unmanaged buffer, and the app removes known token values from its transcript. These measures do not guarantee that every external tool redacts every sensitive value.
+- **Sensitive artifacts:** Terraform state, plans, logs, and backups can contain credentials or customer data. Restrict access, keep them out of Git, and review retention. A private repository is not a secret store.
+- **Input handling:** The app validates supported interview values, serializes structured configuration, and encodes supported API path values. Review custom scripts, templates, and workflow changes before execution.
+- **Transport:** GitHub and HCP API calls use HTTPS with certificate validation. Do not disable validation to bypass connectivity failures.
+- **Dependencies:** Bootstrap can download official packages and modules. Review their versions and provenance; the startup version notice does not install an update or certify the dependency chain.
+- **Enforcement:** GitHub and Azure enforce repository access, approval, identity, and policy controls. AutoPilot reports observed settings and prepares proposals; its local security profile is not an authorization boundary.
 
 ## Known limitations
 
 | Limitation | Detail |
 |---|---|
-| **Brownfield tenants** | Supported, but not guided. Preflight detects colliding management group names, subscriptions parented elsewhere, and subscriptions that already contain resources, and warns rather than blocks. Adopting an existing hierarchy, landing the baseline in audit-only, and deploying structure without moving subscriptions are all done by editing the platform config at the review gate. See [Brownfield tenants](HOW-TO-USE.md#brownfield-tenants). The interview does require management and connectivity subscription IDs |
+| **Existing environments** | Platform discovery reports existing hierarchy, subscription placement, and resources. Adoption and policy rollout require a separate design and state-ownership review. Workload guards do not import resources or migrate state. See [Brownfield tenants](HOW-TO-USE.md#brownfield-tenants). |
 | **Azure DevOps stage 2** | Config generation and bootstrap are automated. Triggering and watching the pipeline is GitHub-only |
 | **Bicep integration** | Preview in Autopilot. Config generation and bootstrap delegation are implemented, but end-to-end deployment, Bicep-specific validation, and the extra networking questions are not validated or implemented to Terraform parity |
 | **Corporate proxies** | Diagnostic checks are available; upstream proxy support, per-tool authentication/trust, and runner network access are not guaranteed |
@@ -320,7 +375,7 @@ The conformance script can skip missing schemas for an ordinary local run; `-Req
 
 ## Sources
 
-This tool is a 1:1 wrapper around the accelerator, so everything it shows comes from the official product rather than being reinvented here:
+Platform bootstrap delegates to the official accelerator. The workload attachment, security preflight, and review-only flows are AutoPilot features. The following table identifies the sources used for platform configuration and guidance:
 
 | What | Where it comes from |
 |---|---|

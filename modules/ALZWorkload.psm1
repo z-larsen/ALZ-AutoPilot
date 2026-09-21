@@ -23,13 +23,54 @@ function Test-ALZWorkloadModulePath {
 
 function Set-ALZDeliveryType {
     param([hashtable]$State)
-    Write-ALZSection 'What are you deploying?'
-    Write-Host '    1. Platform landing zone  (management groups, policy, networking)' -ForegroundColor White
-    Write-Host '    2. New workload / modify existing  (attach to an existing repository; no bootstrap)' -ForegroundColor White
-    $typePick = Read-ALZValue -Prompt 'Choose (1/2)' -Default '1' -Validator { param($v) $v -in @('1', '2') }
-    $State.answers['deliveryType'] = if ($typePick -eq '2') { 'workload' } else { 'landingzone' }
+    Write-ALZSection 'Choose the delivery operation'
+    Write-Host '    1. Bootstrap a new platform landing zone (delivery infrastructure and platform)' -ForegroundColor White
+    Write-Host '    2. Attach a new workload (unused root and state; reuse delivery infrastructure)' -ForegroundColor White
+    Write-Host '    3. Update an attached workload (same root and state; preserve custom workflows)' -ForegroundColor White
+    Write-Host '    4. Review official module upgrades (read-only inventory and handoff)' -ForegroundColor White
+    Write-Host '    5. Review a migration or import (no state changes or deployment)' -ForegroundColor White
+    $typePick = Read-ALZValue -Prompt 'Choose (1/2/3/4/5)' -Default '2' -Validator { param($Value) $Value -in @('1', '2', '3', '4', '5') }
+    $State.answers['deliveryIntent'] = @{ '1' = 'bootstrap'; '2' = 'new-workload'; '3' = 'update-workload'; '4' = 'upgrade-review'; '5' = 'migration-review' }[$typePick]
+    $State.answers['deliveryType'] = if ($typePick -eq '1') { 'landingzone' } elseif ($typePick -in @('2', '3')) { 'workload' } else { 'maintenance' }
+    if ($typePick -in @('2', '3')) { $State.answers['workloadOperation'] = if ($typePick -eq '3') { 'update' } else { 'new' } }
     Save-ALZState -State $State
     return $State
+}
+
+function Show-ALZMaintenanceReview {
+    param([hashtable]$State)
+    Set-ALZPhaseStatus -State $State -Phase 'bootstrap' -Status 'skipped'
+    Set-ALZPhaseStatus -State $State -Phase 'hcp' -Status 'skipped'
+    Write-ALZSection 'Review only - no infrastructure or state changes'
+    if ($State.answers.deliveryIntent -eq 'upgrade-review') {
+        Write-Host '  1. Select the existing repository and Terraform root, not a new bootstrap delivery.'
+        Write-Host '  2. Compare its module source/version pins and provider lock with upstream release and upgrade notes.'
+        Write-Host '  3. Change one dependency set on a feature branch; preserve backend, resource addresses and custom hooks.'
+        Write-Host '  4. Review the plan, policy changes, replacements and compatibility in a test environment before production.'
+        Write-Host '  5. Bootstrap, starter, ALZ Terraform modules and providers are separate upgrade decisions.'
+        $root = Read-ALZValue -Prompt 'Existing Terraform root to inspect (read-only; no init or upgrade)' -Validator ${function:Test-ALZWorkloadModulePath}
+        $State.answers.maintenanceRoot = $root
+        $inventory = Join-Path $root '.terraform/modules/modules.json'
+        if (Test-Path -LiteralPath $inventory) {
+            $modules = Get-Content -LiteralPath $inventory -Raw | ConvertFrom-Json -ErrorAction Stop
+            foreach ($module in $modules.Modules | Where-Object Key) {
+                $source = if ($module.Source -match '^(?:registry\.terraform\.io/)?[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') { $module.Source } else { 'custom source (inspect locally; URL withheld)' }
+                Write-Host "  Cached module $($module.Key): $source, version $($module.Version)"
+            }
+            Write-Host '  Cache metadata can be stale. Verify version constraints in source; this is not proof of deployed versions.'
+        }
+        else { Write-Host '  No local module cache. Review module blocks in source; this check will not initialize the backend.' }
+        Write-Host '  The provider lock file locks providers, not Terraform module versions.'
+    }
+    else {
+        Write-Host '  1. Document current resource ownership, source/destination state, lineage and exact resource addresses.'
+        Write-Host '  2. Back up state securely, confirm locking and identify the authoritative owner of each resource.'
+        Write-Host '  3. Prepare explicit import/moved blocks or a separately reviewed state-migration procedure.'
+        Write-Host '  4. Review changes, recovery steps and approvals before executing any migration command.'
+        Write-Host '  Never use a new empty state or another bootstrap to adopt an existing deployment.'
+    }
+    Set-ALZPhaseStatus -State $State -Phase 'proof' -Status 'pending'
+    Write-Host '  Continue using ordinary GitHub pull requests and Terraform. AutoPilot is not required to execute the reviewed procedure.'
 }
 
 function Invoke-ALZWorkloadInterview {
@@ -41,7 +82,7 @@ function Invoke-ALZWorkloadInterview {
     Write-ALZBanner -Title 'Attach a Terraform workload' -Subtitle 'Reuse an existing GitHub repository and Azure state storage. Bootstrap is skipped.'
     Write-Host '    1. New workload (unused repository folder and state key)' -ForegroundColor White
     Write-Host '    2. Modify existing deployment (existing folder and state)' -ForegroundColor White
-    $choice = Read-ALZValue -Prompt 'Operation (1/2)' -Default $(if ($previousOperation -eq 'update') { '2' } else { '1' }) -Validator { param($Value) $Value -in @('1', '2') }
+    $choice = if ($answers.deliveryIntent -eq 'new-workload') { '1' } elseif ($answers.deliveryIntent -eq 'update-workload') { '2' } else { Read-ALZValue -Prompt 'Operation (1/2)' -Default $(if ($previousOperation -eq 'update') { '2' } else { '1' }) -Validator { param($Value) $Value -in @('1', '2') } }
     $answers.workloadOperation = if ($choice -eq '2') { 'update' } else { 'new' }
     $answers.customModulePath = Read-ALZValue -Prompt 'Full path to your custom Terraform configuration' -Default $answers.customModulePath -Validator ${function:Test-ALZWorkloadModulePath} -ValidationMessage 'Select a folder containing .tf or .tf.json files.'
     $answers.deliveryName = Read-ALZValue -Prompt 'Delivery label (does not rename Azure resources)' -Default $(if ($answers.deliveryName) { $answers.deliveryName } else { 'workload' }) -Validator ${function:Test-ALZWorkloadNotEmpty}
@@ -97,7 +138,7 @@ function Copy-ALZWorkloadModuleFiles {
             if ($item.Name -in @('.git', '.github', '.terraform', '.venv', 'node_modules', 'state-backups')) { continue }
             if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked source paths are not supported: $($item.Name)" }
             if ($item.PSIsContainer) { $pendingFolders.Enqueue($item.FullName); continue }
-            if ($item.Name -match '(?i)(\.tfstate($|\.)|\.tfplan($|\.)|^tfplan($|\.)|^\.env($|\.))') { continue }
+            if ($item.Name -match '(?i)(\.tfstate($|\.)|\.tfplan($|\.)|^tfplan($|\.)|^\.env($|\.)|^autopilot\.binding\.tf\.json$)') { continue }
             $relativePath = [IO.Path]::GetRelativePath($sourcePath, $item.FullName)
             $targetPath = Join-Path $destinationPath $relativePath
             $probePath = $targetPath
@@ -302,6 +343,9 @@ function Write-ALZWorkloadWorkflow {
         if (-not (Test-ALZWorkloadRepository $templatesRepository)) { throw 'Select an exact templates repository.' }
         $branch = if ($answers.workloadBranch) { $answers.workloadBranch } else { 'main' }
         if ($branch -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_/-]*$' -or $branch -match '//') { throw 'The selected default branch is not supported for workflow generation.' }
+        $planRunnerLabels = if ($pipeline.planRunnerLabels) { @($pipeline.planRunnerLabels) } else { @('self-hosted', 'Linux', 'X64', 'alz-plan') }
+        $applyRunnerLabels = if ($pipeline.applyRunnerLabels) { @($pipeline.applyRunnerLabels) } else { @('self-hosted', 'Linux', 'X64', 'alz-apply') }
+        foreach ($label in $planRunnerLabels + $applyRunnerLabels) { if ($label -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Runner labels must use letters, digits, underscores, periods or hyphens.' } }
         $version = if ($pipeline.terraformVersion) { $pipeline.terraformVersion } else { '1.14.9' }
         if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Pin a specific Terraform version.' }
         $stateIdentity = "$($backend.subscriptionId)/$($backend.storageAccount)/$($backend.container)/$($backend.key)"
@@ -311,6 +355,21 @@ function Write-ALZWorkloadWorkflow {
         $workflowRelativePath = ".github/workflows/$workflowName.yml"
         $configPath = Join-Path $Checkout $configRelativePath
         $workflowPath = Join-Path $Checkout $workflowRelativePath
+        if (Test-Path -LiteralPath $configPath) {
+            if ($answers.workloadOperation -ne 'update' -or -not (Test-ALZWorkloadGuid $answers.workloadStateLineage)) { throw 'An existing attachment requires update mode and its verified state lineage.' }
+            $existingConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable -Depth 40
+            if ($existingConfig.schemaVersion -ne 1 -or $existingConfig.bindingId -cne $identityHash -or $existingConfig.repository -cne $answers.workloadRepository -or $existingConfig.root -cne $answers.workloadRoot -or $existingConfig.targetSubscriptionId -ne $answers.subscriptions.management) { throw 'The existing attachment does not match the selected workload. Review a migration instead of regenerating it.' }
+            foreach ($field in @('subscriptionId', 'tenantId', 'resourceGroup', 'storageAccount', 'container', 'key', 'workspace')) {
+                if ([string]$existingConfig.backend[$field] -cne [string]$backend[$field]) { throw 'The existing backend binding changed. Ordinary updates cannot migrate state.' }
+            }
+            if ($existingConfig.expectedLineage -and $existingConfig.expectedLineage -cne $answers.workloadStateLineage) { throw 'The existing attachment state lineage changed.' }
+            if (-not (Test-Path -LiteralPath $workflowPath -PathType Leaf)) { throw 'The attached workflow is missing. Review workflow repair separately.' }
+            $existingConfig.operation = 'update'
+            $existingConfig.expectedLineage = $answers.workloadStateLineage
+            $existingConfig | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $configPath -Encoding UTF8
+            return [pscustomobject]@{ Workflow = $workflowPath; Config = $configPath; WorkflowRelativePath = $workflowRelativePath; ConfigurationRelativePath = $configRelativePath; TemplatesRepository = $existingConfig.pipeline.templatesRepository; StateIdentity = $stateIdentity; Preserved = $true }
+        }
+        if ($answers.workloadOperation -eq 'update') { throw 'This deployment has no matching AutoPilot attachment manifest. Prepare a separate reviewed onboarding or migration; existing workflows will not be replaced.' }
         $null = New-Item -ItemType Directory -Path (Split-Path $configPath -Parent), (Split-Path $workflowPath -Parent) -Force
         $config = [ordered]@{
                 schemaVersion = 1
@@ -322,7 +381,7 @@ function Write-ALZWorkloadWorkflow {
             allowedSubscriptionIds = if ($pipeline.allowedSubscriptionIds) { @($pipeline.allowedSubscriptionIds) } else { @($answers.subscriptions.management) }
             managedResourceGroups = if ($pipeline.managedResourceGroups) { @($pipeline.managedResourceGroups) } else { @(@{ subscriptionId = $answers.subscriptions.management; name = $answers.workloadResourceGroup }) }
             approvedTemplateHashes = if ($pipeline.approvedTemplateHashes) { @($pipeline.approvedTemplateHashes) } else { @() }
-            pipeline = @{ templatesRepository = $templatesRepository; planEnvironment = $pipeline.planEnvironment; applyEnvironment = $pipeline.applyEnvironment }
+            pipeline = @{ templatesRepository = $templatesRepository; planEnvironment = $pipeline.planEnvironment; applyEnvironment = $pipeline.applyEnvironment; planRunnerLabels = $planRunnerLabels; applyRunnerLabels = $applyRunnerLabels; securityProfile = $(if ($pipeline.securityProfile) { $pipeline.securityProfile } else { 'production' }); runnerIsolationReviewed = ($pipeline.runnerIsolationReviewed -eq $true) }
                 backend = $backend
                 operation = $answers.workloadOperation
                 expectedLineage = $answers.workloadStateLineage
@@ -380,6 +439,8 @@ jobs:
             autopilot_target_subscription_id: '__TARGET_SUBSCRIPTION__'
             autopilot_plan_environment: '__PLAN_ENVIRONMENT__'
             autopilot_apply_environment: '__APPLY_ENVIRONMENT__'
+            autopilot_plan_runner_labels: '__PLAN_RUNNER_LABELS__'
+            autopilot_apply_runner_labels: '__APPLY_RUNNER_LABELS__'
             terraform_cli_version: '__TERRAFORM_VERSION__'
             autopilot_enable_apply: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'apply' && github.ref == 'refs/heads/__BRANCH__' }}
             autopilot_confirmation: ${{ inputs.confirmation || '' }}
@@ -398,6 +459,8 @@ jobs:
                 '__TARGET_SUBSCRIPTION__' = $answers.subscriptions.management
                 '__PLAN_ENVIRONMENT__' = $pipeline.planEnvironment
                 '__APPLY_ENVIRONMENT__' = $pipeline.applyEnvironment
+                '__PLAN_RUNNER_LABELS__' = ConvertTo-Json -InputObject $planRunnerLabels -Compress
+                '__APPLY_RUNNER_LABELS__' = ConvertTo-Json -InputObject $applyRunnerLabels -Compress
                 '__TERRAFORM_VERSION__' = $version
         }
         foreach ($entry in $replacements.GetEnumerator()) { $workflow = $workflow.Replace($entry.Key, $entry.Value) }
@@ -421,6 +484,8 @@ jobs:
         $inputs['autopilot_plan_environment'] = @{ type = 'string'; default = '' }
         $inputs['autopilot_apply_environment'] = @{ type = 'string'; default = '' }
         $inputs['autopilot_runner_labels'] = @{ type = 'string'; default = '["self-hosted","Linux","X64"]' }
+        $inputs['autopilot_plan_runner_labels'] = @{ type = 'string'; default = '' }
+        $inputs['autopilot_apply_runner_labels'] = @{ type = 'string'; default = '' }
         $inputs['autopilot_enable_apply'] = @{ type = 'boolean'; default = $false }
         $inputs['autopilot_confirmation'] = @{ type = 'string'; default = '' }
         $inputs['autopilot_plan_run_id'] = @{ type = 'string'; default = '' }
@@ -447,16 +512,56 @@ jobs:
     }
 
     function Read-ALZWorkloadPipeline {
-        param([hashtable]$State)
+        param([hashtable]$State, $Repository, [string]$Token)
         $answers = $State.answers
         $existing = if ($answers.workloadPipeline) { $answers.workloadPipeline } else { @{} }
         $repoLeaf = $answers.workloadRepository.Split('/')[1]
+        if ($answers.workloadOperation -eq 'update') {
+            if (-not $Repository.Commit -or -not $Token) { throw 'Updates require pinned repository discovery before inspecting the existing pipeline.' }
+            $backend = $answers.workloadBackend
+            $identity = "$($backend.subscriptionId)/$($backend.storageAccount)/$($backend.container)/$($backend.key)"
+            $binding = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant().Substring(0, 16)
+            $headers = @{ Authorization = "Bearer $Token"; 'User-Agent' = 'ALZ-AutoPilot'; Accept = 'application/vnd.github+json' }
+            $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$($Repository.Repository)/contents/.github/autopilot/autopilot-$binding.json?ref=$($Repository.Commit)" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+            if ($response.encoding -ne 'base64' -or -not $response.content) { throw 'The existing attachment manifest could not be read.' }
+            $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($response.content)) | ConvertFrom-Json -AsHashtable -Depth 40
+            if ($config.schemaVersion -ne 1 -or $config.bindingId -cne $binding -or $config.repository -cne $answers.workloadRepository -or $config.root -cne $answers.workloadRoot -or $config.targetSubscriptionId -ine $answers.subscriptions.management -or $config.targetResourceGroup -ine $answers.workloadResourceGroup) { throw 'The selected update does not match the existing attachment scope.' }
+            foreach ($field in @('subscriptionId', 'tenantId', 'resourceGroup', 'storageAccount', 'container', 'key', 'workspace')) {
+                if ([string]$config.backend[$field] -cne [string]$backend[$field]) { throw 'The selected update changed the backend binding.' }
+            }
+            $existing = $config.pipeline
+            $existing.allowedSubscriptionIds = @($config.allowedSubscriptionIds)
+            $existing.managedResourceGroups = @($config.managedResourceGroups)
+            $existing.approvedTemplateHashes = @($config.approvedTemplateHashes)
+            $existing.terraformVersion = $config.terraformVersion
+            $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$($Repository.Repository)/contents/.github/workflows/autopilot-$binding.yml?ref=$($Repository.Commit)" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+            if ($response.encoding -ne 'base64' -or -not $response.content) { throw 'The attached workflow could not be inspected.' }
+            Import-Module powershell-yaml -ErrorAction Stop
+            $workflow = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($response.content)) | ConvertFrom-Yaml -Ordered
+            $caller = $workflow.jobs.terraform
+            if ($caller.uses -cne "$($existing.templatesRepository)/.github/workflows/cd-template.yaml@main" -or $caller.with.autopilot_configuration -cne ".github/autopilot/autopilot-$binding.json" -or $caller.with.autopilot_target_subscription_id -ine $config.targetSubscriptionId -or $caller.with.autopilot_plan_environment -cne $existing.planEnvironment -or $caller.with.autopilot_apply_environment -cne $existing.applyEnvironment) { throw 'The attached caller has a custom or mismatched delivery contract. Preserve it and review the update manually.' }
+            $legacyLabels = if ($caller.with.autopilot_runner_labels) { @($caller.with.autopilot_runner_labels | ConvertFrom-Json -ErrorAction Stop) } else { @('self-hosted', 'Linux', 'X64') }
+            $existing.planRunnerLabels = if ($caller.with.autopilot_plan_runner_labels) { @($caller.with.autopilot_plan_runner_labels | ConvertFrom-Json -ErrorAction Stop) } else { $legacyLabels }
+            $existing.applyRunnerLabels = if ($caller.with.autopilot_apply_runner_labels) { @($caller.with.autopilot_apply_runner_labels | ConvertFrom-Json -ErrorAction Stop) } else { $legacyLabels }
+            foreach ($label in $existing.planRunnerLabels + $existing.applyRunnerLabels) { if ($label -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Dynamic runner selectors require manual review; isolation cannot be assumed.' } }
+            $existing.securityProfile = Read-ALZValue -Prompt 'Security review profile (production/learning; learning reports gaps without claiming approval gates)' -Default $(if ($existing.securityProfile) { $existing.securityProfile } else { 'production' }) -Validator { param($Value) $Value -in @('production', 'learning') }
+            if ($config.expectedLineage) { $answers.workloadStateLineage = $config.expectedLineage }
+            elseif ($answers.workloadValidationMode -eq 'runner' -and -not $answers.workloadStateLineage) {
+                $answers.workloadStateLineage = Read-ALZValue -Prompt 'Expected state lineage from the prior successful run (the runner must verify it)' -Validator ${function:Test-ALZWorkloadGuid}
+            }
+            $answers.workloadPipeline = $existing
+            Save-ALZState -State $State
+            return $existing
+        }
         $pipeline = [ordered]@{
             templatesRepository = Read-ALZValue -Prompt 'Existing ALZ templates repository (owner/repository)' -Default $(if ($existing.templatesRepository) { $existing.templatesRepository } else { "$($answers.workloadRepository)-templates" }) -Validator ${function:Test-ALZWorkloadRepository}
             planEnvironment = Read-ALZValue -Prompt 'Existing plan environment' -Default $(if ($existing.planEnvironment) { $existing.planEnvironment } else { "$repoLeaf-plan" }) -Validator { param($Value) $Value -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$' }
             applyEnvironment = Read-ALZValue -Prompt 'Existing apply environment' -Default $(if ($existing.applyEnvironment) { $existing.applyEnvironment } else { "$repoLeaf-apply" }) -Validator { param($Value) $Value -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$' }
             terraformVersion = '1.14.9'
-            runnerLabels = @('self-hosted', 'Linux', 'X64')
+            securityProfile = Read-ALZValue -Prompt 'Security review profile (production/learning; learning has no independent approval claim)' -Default $(if ($existing.securityProfile) { $existing.securityProfile } else { 'production' }) -Validator { param($Value) $Value -in @('production', 'learning') }
+            planRunnerLabels = @((Read-ALZValue -Prompt 'Existing plan-runner labels (comma-separated)' -Default $(if ($existing.planRunnerLabels) { $existing.planRunnerLabels -join ',' } else { 'self-hosted,Linux,X64,alz-plan' }) -Validator { param($Value) $Value -match '^[a-zA-Z0-9_.-]+(,[a-zA-Z0-9_.-]+)*$' }).Split(','))
+            applyRunnerLabels = @((Read-ALZValue -Prompt 'Existing apply-runner labels (comma-separated)' -Default $(if ($existing.applyRunnerLabels) { $existing.applyRunnerLabels -join ',' } else { 'self-hosted,Linux,X64,alz-apply' }) -Validator { param($Value) $Value -match '^[a-zA-Z0-9_.-]+(,[a-zA-Z0-9_.-]+)*$' }).Split(','))
+            runnerIsolationReviewed = Read-ALZConfirm -Prompt 'Have platform owners separately verified clean disposable runner hosts, restricted runner access and no shared privileged identity? (Acknowledgment only; no runners are changed)' -Default $false
             allowedSubscriptionIds = @($answers.subscriptions.management)
             managedResourceGroups = @(@{ subscriptionId = $answers.subscriptions.management; name = $answers.workloadResourceGroup })
         }
@@ -468,19 +573,50 @@ jobs:
         return $pipeline
     }
 
+    function Test-ALZWorkloadRunnerIsolation {
+        param([System.Collections.IDictionary]$Pipeline, [object[]]$Runners)
+        $planLabels = if ($Pipeline.planRunnerLabels) { @($Pipeline.planRunnerLabels) } else { @('self-hosted', 'Linux', 'X64') }
+        $applyLabels = if ($Pipeline.applyRunnerLabels) { @($Pipeline.applyRunnerLabels) } else { @('self-hosted', 'Linux', 'X64') }
+        $matches = @{}
+        foreach ($stage in @('plan', 'apply')) {
+            $requiredLabels = if ($stage -eq 'plan') { $planLabels } else { $applyLabels }
+            $matches[$stage] = @($Runners | Where-Object { $labels = @($_.labels.name); @($requiredLabels | Where-Object { $_ -notin $labels }).Count -eq 0 })
+            if (@($matches[$stage] | Where-Object status -EQ 'online').Count -eq 0) { throw "No existing online $stage runner matches the configured labels. Provision or select runners separately; bootstrap will not run." }
+        }
+        $overlap = @($matches.plan | Where-Object { $_.id -in @($matches.apply.id) })
+        if ($overlap.Count) {
+            if ($Pipeline.securityProfile -ne 'learning') { throw 'Plan and apply selectors overlap on the same runners. Production requires separate execution pools.' }
+            Write-ALZStatus -Status WARN -Message 'Plan and apply can execute on the same persistent runners. Learning-only routing; this is not isolated execution.'
+        }
+        else { Write-ALZStatus -Status INFO -Message 'Plan and apply selectors match disjoint runner IDs. Labels do not prove clean hosts, network isolation or ephemeral execution.' }
+        if ($Pipeline.securityProfile -ne 'learning' -and $Pipeline.runnerIsolationReviewed -ne $true) { throw 'Production runner isolation has not been reviewed. Record runnerIsolationReviewed=true only after platform owners verify clean ephemeral hosts, runner-group/workflow restrictions and no shared privileged identity. This is an acknowledgment, not an automated attestation.' }
+        return $true
+    }
+
     function Test-ALZWorkloadPipelineAccess {
         param([hashtable]$State, [string]$Token)
         $headers = @{ Authorization = "Bearer $Token"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'ALZ-AutoPilot' }
         $answers = $State.answers
         $baseUri = "https://api.github.com/repos/$($answers.workloadRepository)"
-        $runners = Invoke-RestMethod -Uri "$baseUri/actions/runners?per_page=100" -Headers $headers -Method Get -TimeoutSec 30 -ErrorAction Stop
-        if (@($runners.runners | Where-Object status -EQ 'online').Count -lt 1) { throw 'No existing online runner is available to validate private state. Bootstrap will not be run.' }
+        $inventory = @()
+        $page = 1
+        do {
+            $runners = Invoke-RestMethod -Uri "$baseUri/actions/runners?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30 -ErrorAction Stop
+            if ($null -eq $runners.runners -or $null -eq $runners.total_count) { throw 'The runner inventory is incomplete.' }
+            $inventory += @($runners.runners)
+            $page++
+        } while (@($runners.runners).Count -eq 100)
+        if ($inventory.Count -ne $runners.total_count) { throw 'Runner inventory changed or is incomplete; repeat discovery.' }
+        $null = Test-ALZWorkloadRunnerIsolation -Pipeline $answers.workloadPipeline -Runners $inventory
+        $clients = @()
         foreach ($environment in @($answers.workloadPipeline.planEnvironment, $answers.workloadPipeline.applyEnvironment)) {
             $encodedEnvironment = [uri]::EscapeDataString($environment)
             $null = Invoke-RestMethod -Uri "$baseUri/environments/$encodedEnvironment" -Headers $headers -Method Get -TimeoutSec 30 -ErrorAction Stop
             $clientVariable = Invoke-RestMethod -Uri "$baseUri/environments/$encodedEnvironment/variables/AZURE_CLIENT_ID" -Headers $headers -Method Get -TimeoutSec 30 -ErrorAction Stop
             if (-not (Test-ALZWorkloadGuid $clientVariable.value)) { throw "The existing environment $environment has no valid OIDC client ID." }
+            $clients += $clientVariable.value
         }
+        if ($clients[0] -eq $clients[1]) { throw 'Plan and apply environments must not share the same Azure identity.' }
         $backend = $answers.workloadBackend
         foreach ($subscriptionId in @($answers.workloadPipeline.allowedSubscriptionIds) + @($backend.subscriptionId) | Select-Object -Unique) {
             $account = Invoke-ALZWorkloadAzureRead @('account', 'show', '--subscription', $subscriptionId)
@@ -614,13 +750,19 @@ function Invoke-ALZWorkloadDelivery {
         $token = ConvertTo-ALZPlainText -Secure $secureToken
         $repository = Get-ALZWorkloadRepositoryContext -State $State -Token $token
         $backend = Read-ALZWorkloadBackend -State $State -Repository $repository
-        if ($State.answers.workloadUsePipeline) { $null = Read-ALZWorkloadPipeline -State $State }
+        if ($State.answers.workloadUsePipeline) {
+            $null = Read-ALZWorkloadPipeline -State $State -Repository $repository -Token $token
+            $security = @(Test-ALZWorkloadGitHubSecurity -Repository $repository.Repository -Branch $repository.Branch -Pipeline $State.answers.workloadPipeline -Token $token)
+            Write-ALZResults $security
+            $State.answers.workloadSecurityReview = @{ checkedUtc = (Get-Date).ToUniversalTime().ToString('o'); profile = $State.answers.workloadPipeline.securityProfile; findings = $security }
+            if (@($security | Where-Object Status -EQ 'FAIL').Count) { throw 'The GitHub security profile has unmet or unverified requirements. No settings were changed.' }
+            $null = Test-ALZWorkloadPipelineAccess -State $State -Token $token
+        }
         $rootPrefix = if ($State.answers.workloadRoot -eq '.') { '' } else { "$($State.answers.workloadRoot)/" }
         $rootFiles = @($repository.Files | Where-Object { $_.StartsWith($rootPrefix, [StringComparison]::Ordinal) })
         $rootExists = if ($State.answers.workloadOperation -eq 'new') { $rootFiles.Count -gt 0 } else { @($rootFiles | Where-Object { $_.Substring($rootPrefix.Length) -match '^[^/]+\.tf(\.json)?$' }).Count -gt 0 }
         $runnerValidation = $State.answers.workloadUsePipeline -and $State.answers.workloadValidationMode -eq 'runner'
         if ($runnerValidation) {
-            $null = Test-ALZWorkloadPipelineAccess -State $State -Token $token
             if ($State.answers.workloadOperation -eq 'new' -and $rootExists) { throw 'The new workload folder already exists. Select modify existing.' }
             if ($State.answers.workloadOperation -eq 'update' -and (-not $rootExists -or -not $State.answers.workloadStateLineage)) { throw 'Runner-based updates require the existing root and a previously verified state lineage. Inspect private state before attaching an update.' }
             $classification = [pscustomobject]@{ Operation = $State.answers.workloadOperation; Environment = 'pending runner validation'; ImportReviewRequired = $false }
@@ -646,11 +788,15 @@ function Invoke-ALZWorkloadDelivery {
         if (-not (Read-ALZConfirm -Prompt 'Prepare a local proposal only (no commit, push, workflow run, or Azure changes)?' -Default $false)) { return }
         Set-ALZCurrentPhase -State $State -Phase 'config'
         $proposal = New-ALZWorkloadProposal -State $State -Repository $repository -Token $token
+        $templateProposal = $null
         if ($State.answers.workloadUsePipeline) {
             $wiring = Write-ALZWorkloadWorkflow -State $State -Checkout $proposal.Checkout
-            Protect-ALZWorkloadLegacyTriggers -Checkout $proposal.Checkout -Root $State.answers.workloadRoot
             $proposal | Add-Member -NotePropertyName Wiring -NotePropertyValue $wiring
-            $templateProposal = New-ALZWorkloadTemplateProposal -State $State -Token $token
+            if (-not $wiring.Preserved) {
+                Protect-ALZWorkloadLegacyTriggers -Checkout $proposal.Checkout -Root $State.answers.workloadRoot
+                $templateProposal = New-ALZWorkloadTemplateProposal -State $State -Token $token
+            }
+            else { Write-ALZStatus -Status INFO -Message 'Preserved the attached workflow, initialization hooks, access helper and reusable template. Workflow upgrades require their own PR.' }
             $State.answers.workloadTemplateProposal = $templateProposal
         }
         $State.answers.workloadProposal = $proposal
@@ -663,7 +809,7 @@ function Invoke-ALZWorkloadDelivery {
         Write-Host "  Terraform root: $($proposal.Root)" -ForegroundColor White
         Write-Host "  Backend configuration: $($proposal.BackendConfig)" -ForegroundColor White
         if ($State.answers.workloadUsePipeline -and (Read-ALZConfirm -Prompt 'Commit this proposal to a new GitHub feature branch and create a draft PR (no merge or apply)?' -Default $false)) {
-            if (@(Get-ALZWorkloadChangedFiles -Checkout $templateProposal.Checkout).Count -gt 0) {
+            if ($templateProposal -and @(Get-ALZWorkloadChangedFiles -Checkout $templateProposal.Checkout).Count -gt 0) {
                 $templatePublication = Publish-ALZWorkloadPullRequest -State $State -Repository $templateProposal.Repository -Checkout $templateProposal.Checkout -Token $token -PublicationKey 'templatePullRequest' -Title 'Add opt-in AutoPilot workload planning and reviewed apply' -Body 'Extend the existing reusable CD workflow without changing its path or existing callers. Adds isolated backend/target routing, read-only discovery, no-delete plan validation, and a separate main-branch dispatch to apply a reviewed saved plan. No bootstrap or infrastructure deployment is performed by this PR.'
                 Write-ALZStatus -Status OK -Message 'Merge the reusable-template PR first.' -Detail $templatePublication.pullRequestUrl
             }
@@ -682,4 +828,4 @@ function Invoke-ALZWorkloadDelivery {
     }
 }
 
-Export-ModuleMember -Function Set-ALZDeliveryType, Invoke-ALZWorkloadInterview, Invoke-ALZWorkloadContentSwap, Invoke-ALZWorkloadDelivery
+Export-ModuleMember -Function Set-ALZDeliveryType, Show-ALZMaintenanceReview, Invoke-ALZWorkloadInterview, Invoke-ALZWorkloadContentSwap, Invoke-ALZWorkloadDelivery
