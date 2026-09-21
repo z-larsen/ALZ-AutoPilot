@@ -408,6 +408,13 @@ function Write-ALZInputsYaml {
     $subConn = & $san $a.subscriptions.connectivity
     $subSec = & $san $a.subscriptions.security
 
+    # Defaults match the accelerator's own "alz"/"mgmt"/1. Overridable so a second
+    # delivery in the same org/subscription (e.g. a custom workload alongside an
+    # existing landing zone) can avoid colliding on repo/team/mgmt-group/RG names.
+    $serviceName = if ($a.serviceName) { & $san $a.serviceName } else { 'alz' }
+    $environmentName = if ($a.environmentName) { & $san $a.environmentName } else { 'mgmt' }
+    $postfixNumber = if ($a.postfixNumber) { $a.postfixNumber } else { 1 }
+
     # Only emit subscriptions that have a value. A blank entry still reaches the starter
     # module's subscription_placement, where it fails validation twice: it is not a valid
     # UUID, and two blanks count as the same ID specified more than once.
@@ -485,9 +492,9 @@ $subscriptionIds
 
 bootstrap_subscription_id: "$subMgmt"
 
-service_name: "alz"
-environment_name: "mgmt"
-postfix_number: 1
+service_name: "$serviceName"
+environment_name: "$environmentName"
+postfix_number: $postfixNumber
 
 $vcsBlock
 
