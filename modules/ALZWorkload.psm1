@@ -439,6 +439,7 @@ jobs:
         $scriptContent = (Get-Content -LiteralPath (Join-Path $dataFolder 'workload-pipeline.ps1') -Raw).Replace("`r`n", "`n").Replace("`r", "`n")
         $jobs['autopilot-plan'].steps | Where-Object name -EQ 'Validate, discover state, and plan' | ForEach-Object { $_.run = "& {`n$scriptContent`n} -Stage Plan -Configuration `$env:AUTOPILOT_CONFIGURATION" }
         $jobs['autopilot-apply'].steps | Where-Object name -EQ 'Verify and apply saved plan' | ForEach-Object { $_.run = "& {`n$scriptContent`n} -Stage Apply -Configuration `$env:AUTOPILOT_CONFIGURATION" }
+        $jobs['autopilot-apply'].steps | Where-Object name -EQ 'Initialize reviewed workload' | ForEach-Object { $_.run = "& {`n$scriptContent`n} -Stage Initialize -Configuration `$env:AUTOPILOT_CONFIGURATION" }
         foreach ($jobName in $jobs.Keys) { $template.jobs[$jobName] = $jobs[$jobName] }
         $serializedTemplate = ($template | ConvertTo-Yaml -Options DisableAliases).Replace("`r`n", "`n").TrimEnd() + "`n"
         Set-Content -LiteralPath $Path -Value $serializedTemplate -Encoding UTF8 -NoNewline

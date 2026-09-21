@@ -1,12 +1,12 @@
 param(
-    [ValidateSet('Plan', 'Apply')][string]$Stage,
+    [ValidateSet('Plan', 'Apply', 'Initialize')][string]$Stage,
     [string]$Configuration
 )
 
 function Invoke-WorkloadCommand {
     param([string]$Command, [string[]]$Arguments, [switch]$Json)
     $operation = if ($Command -eq 'terraform') {
-        @($Arguments | Where-Object { $_ -in @('init', 'validate', 'plan', 'show', 'apply') }) | Select-Object -First 1
+        @($Arguments | Where-Object { $_ -in @('init', 'validate', 'plan', 'show', 'apply', 'output') }) | Select-Object -First 1
     } else { 'read' }
     Write-Host "${Stage}: $Command $operation"
     $captured = @(& $Command @Arguments 2>&1)
@@ -121,8 +121,47 @@ function Read-WorkloadState {
     finally { if (Test-Path -LiteralPath $tempState) { Remove-Item -LiteralPath $tempState -Force } }
 }
 
+function Get-WorkloadInitialization {
+    param([System.Collections.IDictionary]$Config, [string]$Root)
+    if (-not $Config.initialization) { return }
+    $initialization = $Config.initialization
+    if ($initialization.type -cne 'finops-v14-private' -or $initialization.script -cne 'scripts/Initialize-FinOpsHub.ps1' -or $initialization.bundle -cne 'vendor/finops-hub-v14/initialization.json') { throw 'Unsupported workload initialization contract.' }
+    foreach ($relativePath in @($initialization.script, $initialization.bundle)) {
+        $current = $Root
+        foreach ($segment in $relativePath.Split('/')) {
+            $current = Join-Path $current $segment
+            if ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Initialization files cannot use symbolic links.' }
+        }
+    }
+    $scriptPath = Join-Path $Root $initialization.script
+    $bundlePath = Join-Path $Root $initialization.bundle
+    return @{
+        scriptPath = $scriptPath
+        bundlePath = $bundlePath
+        scriptHash = (Get-FileHash $scriptPath -Algorithm SHA256).Hash
+        bundleHash = (Get-FileHash $bundlePath -Algorithm SHA256).Hash
+    }
+}
+
+function Test-WorkloadInitializationReceipt {
+    param([System.Collections.IDictionary]$Receipt, [System.Collections.IDictionary]$Config, [System.Collections.IDictionary]$Snapshot, [System.Collections.IDictionary]$Initialization, [string]$ManifestHash, [string]$SourceRunId, [string]$SourceAttempt)
+    if (-not $Initialization -or $Receipt.schemaVersion -ne 1 -or $Receipt.status -cne 'Applied' -or $Receipt.event -cne 'workflow_dispatch') { throw 'Initialization requires a successful Terraform apply receipt.' }
+    if ($Receipt.commit -cne $env:GITHUB_SHA -or $Receipt.repository -cne $env:GITHUB_REPOSITORY -or $Receipt.workflowRef -cne $env:GITHUB_WORKFLOW_REF -or $Receipt.bindingId -cne $Config.bindingId -or $Receipt.manifestHash -cne $ManifestHash) { throw 'The apply receipt does not match this source revision and workload.' }
+    if ([string]$Receipt.runId -cne $SourceRunId -or [string]$Receipt.runAttempt -cne $SourceAttempt) { throw 'The apply receipt is from a different run or attempt.' }
+    if (-not $Snapshot.exists -or -not $Receipt.lineage -or $Receipt.lineage -cne $Snapshot.lineage -or $Receipt.serial -ne $Snapshot.serial -or $Receipt.serial -lt 1) { throw 'State changed after the successful apply. Review an update; initialization will not reapply Terraform.' }
+    if ($Receipt.initializationScriptHash -cne $Initialization.scriptHash -or $Receipt.initializationBundleHash -cne $Initialization.bundleHash) { throw 'The reviewed initializer or bundle changed after apply.' }
+}
+
+function Invoke-WorkloadInitialization {
+    param([System.Collections.IDictionary]$Config, [System.Collections.IDictionary]$Initialization, [string]$Root)
+    $context = Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$Root", 'output', '-json', 'finops_initialization') -Json
+    $approvedScope = @($Config.managedResourceGroups | Where-Object { $_.subscriptionId -ieq $context.subscriptionId -and $_.name -ieq $context.resourceGroup })
+    if ($context.tenantId -ine $Config.backend.tenantId -or $approvedScope.Count -ne 1 -or $context.bundleHash -ine $Initialization.bundleHash -or $context.templateHash -notin @($Config.approvedTemplateHashes)) { throw 'Initialization outputs are outside the reviewed workload contract.' }
+    & $Initialization.scriptPath -Context $context -BundlePath $Initialization.bundlePath
+}
+
 function Invoke-WorkloadPipeline {
-    param([ValidateSet('Plan', 'Apply')][string]$Stage, [string]$Configuration)
+    param([ValidateSet('Plan', 'Apply', 'Initialize')][string]$Stage, [string]$Configuration)
     $ErrorActionPreference = 'Stop'
     if ($Configuration -notmatch '^\.github/autopilot/[a-z0-9-]+\.json$') { throw 'Invalid workload configuration path.' }
     $config = Get-Content -LiteralPath $Configuration -Raw | ConvertFrom-Json -AsHashtable -Depth 30
@@ -134,12 +173,20 @@ function Invoke-WorkloadPipeline {
     $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $root = [IO.Path]::GetFullPath((Join-Path $workspace $config.root))
     if ($root -ne $workspace -and -not $root.StartsWith($workspace + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal)) { throw 'Terraform root escapes the checkout.' }
+    $initialization = Get-WorkloadInitialization -Config $config -Root $root
+    if ($Stage -eq 'Initialize' -and -not $initialization) {
+        if ($eventPayload.inputs.action -eq 'initialize') { throw 'This workload has no approved initializer.' }
+        return
+    }
+    if ($Stage -ne 'Plan' -and ($env:GITHUB_EVENT_NAME -ne 'workflow_dispatch' -or $env:GITHUB_REF -cne "refs/heads/$($eventPayload.repository.default_branch)" -or $env:AUTOPILOT_CONFIRMATION -ne $config.targetSubscriptionId)) { throw 'Apply and initialization require an explicit default-branch dispatch and subscription confirmation.' }
     $env:TF_IN_AUTOMATION = 'true'
     $env:TF_INPUT = 'false'
     $env:TF_WORKSPACE = 'default'
     $env:ARM_RESOURCE_PROVIDER_REGISTRATIONS = 'none'
     $env:TF_DATA_DIR = Join-Path $env:RUNNER_TEMP ("tfdata-$Stage-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
     $artifact = Join-Path $workspace '.autopilot-plan'
+    $applyArtifact = Join-Path $workspace '.autopilot-apply'
+    if ($Stage -eq 'Apply' -and (Test-Path -LiteralPath $applyArtifact)) { Remove-Item -LiteralPath $applyArtifact -Recurse -Force }
     $backendFile = Join-Path $env:RUNNER_TEMP ("backend-$Stage-$env:GITHUB_RUN_ID.json")
     $backend = $config.backend
     @{
@@ -155,13 +202,15 @@ function Invoke-WorkloadPipeline {
     } | ConvertTo-Json | Set-Content -LiteralPath $backendFile -Encoding UTF8
     try {
         $planFile = Join-Path $artifact 'tfplan'
-        $receiptFile = Join-Path $artifact 'receipt.json'
+        $receiptFile = Join-Path $(if ($Stage -eq 'Initialize') { $applyArtifact } else { $artifact }) 'receipt.json'
         $lockFile = Join-Path $root '.terraform.lock.hcl'
-        $artifactLock = Join-Path $artifact 'terraform.lock.hcl'
+        $artifactLock = Join-Path $(if ($Stage -eq 'Initialize') { $applyArtifact } else { $artifact }) 'terraform.lock.hcl'
         $manifestHash = (Get-FileHash -LiteralPath $Configuration -Algorithm SHA256).Hash
-        if ($Stage -eq 'Apply') {
-            $receipt = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json
-            if ($receipt.commit -ne $env:GITHUB_SHA -or $receipt.repository -cne $env:GITHUB_REPOSITORY -or $receipt.manifestHash -cne $manifestHash -or $receipt.planHash -cne (Get-FileHash -LiteralPath $planFile -Algorithm SHA256).Hash) { throw 'The saved plan is not bound to this source revision.' }
+        if ($Stage -ne 'Plan') {
+            $receipt = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json -AsHashtable
+            if ($receipt.commit -ne $env:GITHUB_SHA -or $receipt.repository -cne $env:GITHUB_REPOSITORY -or $receipt.manifestHash -cne $manifestHash) { throw 'The saved receipt is not bound to this source revision.' }
+            if ($Stage -eq 'Apply' -and $receipt.planHash -cne (Get-FileHash -LiteralPath $planFile -Algorithm SHA256).Hash) { throw 'The saved plan content changed.' }
+            if ($initialization -and ($receipt.initializationScriptHash -cne $initialization.scriptHash -or $receipt.initializationBundleHash -cne $initialization.bundleHash)) { throw 'The reviewed initializer or bundle does not match this plan or apply receipt.' }
             if ($receipt.lockHash) {
                 if ($receipt.lockHash -cne (Get-FileHash -LiteralPath $artifactLock -Algorithm SHA256).Hash) { throw 'The saved provider lock file changed.' }
                 Copy-Item -LiteralPath $artifactLock -Destination $lockFile -Force
@@ -176,6 +225,15 @@ function Invoke-WorkloadPipeline {
         Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'validate', '-no-color')
         $snapshot = Read-WorkloadState -Config $config
         Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'init', '-reconfigure', '-input=false', '-no-color', "-backend-config=$backendFile")
+        if ($Stage -eq 'Initialize') {
+            if ($env:AUTOPILOT_TEMPLATE_CONFIRMATION -cne ($config.approvedTemplateHashes -join ',')) { throw 'Initialization requires the reviewed template hash confirmation.' }
+            $sourceRun = if ($eventPayload.inputs.action -eq 'initialize') { $env:AUTOPILOT_PLAN_RUN_ID } else { $env:GITHUB_RUN_ID }
+            $sourceAttempt = if ($eventPayload.inputs.action -eq 'initialize') { $env:AUTOPILOT_PLAN_ATTEMPT } else { $env:GITHUB_RUN_ATTEMPT }
+            Test-WorkloadInitializationReceipt -Receipt $receipt -Config $config -Snapshot $snapshot -Initialization $initialization -ManifestHash $manifestHash -SourceRunId $sourceRun -SourceAttempt $sourceAttempt
+            Invoke-WorkloadInitialization -Config $config -Initialization $initialization -Root $root
+            'Verified workload initialization. No Terraform plan or apply was run during this stage.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            return
+        }
         if ($Stage -eq 'Plan') {
             if (Test-Path -LiteralPath $artifact) { Remove-Item -LiteralPath $artifact -Recurse -Force }
             $null = New-Item -ItemType Directory -Path $artifact
@@ -201,7 +259,9 @@ function Invoke-WorkloadPipeline {
                 lineage = $snapshot.lineage
                 serial = $snapshot.serial
                 nestedTemplateHashes = @($config.approvedTemplateHashes)
-            } | ConvertTo-Json | Set-Content -LiteralPath $receiptFile -Encoding UTF8
+                initializationScriptHash = $initialization.scriptHash
+                initializationBundleHash = $initialization.bundleHash
+            } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $receiptFile -Encoding UTF8
             $changes | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifact 'changes.json') -Encoding UTF8
             @("## Terraform workload plan", "Root: $($config.root)", "Target subscription: $($config.targetSubscriptionId)", "State: $($backend.storageAccount)/$($backend.container)/$($backend.key)", "Plan run: $env:GITHUB_RUN_ID, attempt: $env:GITHUB_RUN_ATTEMPT", "Changes: $($changes.Count). No deletions, replacements, imports, or management-group changes allowed.") | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
             foreach ($change in $changes) { "- $($change.Actions): $($change.Address)" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }
@@ -216,6 +276,31 @@ function Invoke-WorkloadPipeline {
             $plan = Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'show', '-json', $planFile) -Json
             $null = Test-WorkloadPlan -Plan $plan -AllowedSubscriptions $config.allowedSubscriptionIds -AllowedResourceGroups $config.managedResourceGroups.name -ApprovedTemplateHashes $config.approvedTemplateHashes -TemplateRoot $root
             Invoke-WorkloadCommand -Command terraform -Arguments @("-chdir=$root", 'apply', '-input=false', '-no-color', '-lock-timeout=5m', '-auto-approve', $planFile)
+            if ($initialization) {
+                $appliedState = Read-WorkloadState -Config $config
+                $null = New-Item -ItemType Directory -Path $applyArtifact -Force
+                @{
+                    schemaVersion = 1
+                    status = 'Applied'
+                    commit = $env:GITHUB_SHA
+                    repository = $env:GITHUB_REPOSITORY
+                    workflowRef = $env:GITHUB_WORKFLOW_REF
+                    event = $env:GITHUB_EVENT_NAME
+                    runId = $env:GITHUB_RUN_ID
+                    runAttempt = $env:GITHUB_RUN_ATTEMPT
+                    bindingId = $config.bindingId
+                    manifestHash = $manifestHash
+                    lineage = $appliedState.lineage
+                    serial = $appliedState.serial
+                    planHash = $receipt.planHash
+                    planRunId = $receipt.runId
+                    planAttempt = $receipt.runAttempt
+                    lockHash = $receipt.lockHash
+                    initializationScriptHash = $initialization.scriptHash
+                    initializationBundleHash = $initialization.bundleHash
+                } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $applyArtifact 'receipt.json') -Encoding UTF8
+                if ($receipt.lockHash) { Copy-Item -LiteralPath $artifactLock -Destination (Join-Path $applyArtifact 'terraform.lock.hcl') }
+            }
             'Applied the reviewed saved plan.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
         }
     }

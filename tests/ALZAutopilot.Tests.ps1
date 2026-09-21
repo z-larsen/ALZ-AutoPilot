@@ -364,6 +364,93 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         $failure.Exception.Message | Should -Not -Match 'private-state-value'
     }
 
+    It 'requires exact source, artifact and state bindings for initialization retries' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $receipt = @{
+            schemaVersion = 1; status = 'Applied'; event = 'workflow_dispatch'
+            commit = $env:GITHUB_SHA; repository = $env:GITHUB_REPOSITORY; workflowRef = $env:GITHUB_WORKFLOW_REF
+            bindingId = 'bound'; manifestHash = 'manifest'; runId = '123'; runAttempt = '1'
+            lineage = '11111111-1111-1111-1111-111111111111'; serial = 4
+            initializationScriptHash = 'script'; initializationBundleHash = 'bundle'
+        }
+        $parameters = @{
+            Config = @{ bindingId = 'bound' }
+            Snapshot = @{ exists = $true; lineage = $receipt.lineage; serial = 4 }
+            Initialization = @{ scriptHash = 'script'; bundleHash = 'bundle' }
+            ManifestHash = 'manifest'; SourceRunId = '123'; SourceAttempt = '1'
+        }
+        { Test-WorkloadInitializationReceipt -Receipt $receipt @parameters } | Should -Not -Throw
+        foreach ($property in @('status', 'event', 'commit', 'repository', 'workflowRef', 'bindingId', 'manifestHash', 'runId', 'runAttempt', 'lineage', 'initializationScriptHash', 'initializationBundleHash')) {
+            $changed = $receipt.Clone()
+            $changed[$property] = 'different'
+            { Test-WorkloadInitializationReceipt -Receipt $changed @parameters } | Should -Throw
+        }
+        $parameters.Snapshot.serial = 5
+        { Test-WorkloadInitializationReceipt -Receipt $receipt @parameters } | Should -Throw '*State changed*'
+    }
+
+    It 'hashes only the explicit FinOps initialization contract without executing it' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $root = Join-Path $TestDrive 'initializer'
+        $null = New-Item -ItemType Directory -Path "$root/scripts", "$root/vendor/finops-hub-v14" -Force
+        Set-Content "$root/scripts/Initialize-FinOpsHub.ps1" "throw 'must not run during planning'"
+        Set-Content "$root/vendor/finops-hub-v14/initialization.json" '{}'
+        $config = @{ initialization = @{ type = 'finops-v14-private'; script = 'scripts/Initialize-FinOpsHub.ps1'; bundle = 'vendor/finops-hub-v14/initialization.json' } }
+        $result = Get-WorkloadInitialization -Config $config -Root $root
+        $result.scriptHash | Should -Be (Get-FileHash "$root/scripts/Initialize-FinOpsHub.ps1").Hash
+        $config.initialization.script = '../unreviewed.ps1'
+        { Get-WorkloadInitialization -Config $config -Root $root } | Should -Throw '*Unsupported*'
+    }
+
+    It 'retries initialization without planning or applying Terraform' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $workspace = Join-Path $TestDrive 'retry-workspace'
+        $null = New-Item -ItemType Directory -Path "$workspace/.github/autopilot", "$workspace/workloads/finops", "$workspace/.autopilot-apply", "$workspace/temp" -Force
+        $environment = @{
+            GITHUB_WORKSPACE=$workspace; RUNNER_TEMP="$workspace/temp"; GITHUB_SHA='reviewed-commit'
+            GITHUB_REPOSITORY='contoso/platform'; GITHUB_REF='refs/heads/main'; GITHUB_RUN_ID='999'; GITHUB_RUN_ATTEMPT='1'
+            GITHUB_WORKFLOW_REF='contoso/platform/.github/workflows/workload.yml@refs/heads/main'
+            GITHUB_EVENT_NAME='workflow_dispatch'; GITHUB_EVENT_PATH="$workspace/event.json"; GITHUB_STEP_SUMMARY="$workspace/summary.md"
+            ARM_SUBSCRIPTION_ID='approved'; ARM_TENANT_ID='tenant'; ARM_CLIENT_ID='apply-client'
+            AUTOPILOT_CONFIRMATION='approved'; AUTOPILOT_PLAN_RUN_ID='123'; AUTOPILOT_PLAN_ATTEMPT='1'; AUTOPILOT_TEMPLATE_CONFIRMATION='template'
+        }
+        $previous = @{}
+        foreach ($name in @($environment.Keys) + @('TF_IN_AUTOMATION', 'TF_INPUT', 'TF_WORKSPACE', 'TF_DATA_DIR', 'ARM_RESOURCE_PROVIDER_REGISTRATIONS')) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name)
+        }
+        $config = @{ schemaVersion=1; repository='contoso/platform'; targetSubscriptionId='approved'; root='workloads/finops'; bindingId='bound'; allowedSubscriptionIds=@('approved'); approvedTemplateHashes=@('template'); backend=@{workspace='default'; tenantId='tenant'; subscriptionId='approved'} }
+        $config | ConvertTo-Json -Depth 6 | Set-Content "$workspace/.github/autopilot/retry.json"
+        @{ repository=@{private=$true; default_branch='main'}; inputs=@{action='initialize'} } | ConvertTo-Json | Set-Content "$workspace/event.json"
+        $receipt = @{
+            schemaVersion=1; status='Applied'; event='workflow_dispatch'; commit='reviewed-commit'; repository='contoso/platform'
+            workflowRef=$environment.GITHUB_WORKFLOW_REF; bindingId='bound'; manifestHash=(Get-FileHash "$workspace/.github/autopilot/retry.json").Hash
+            runId='123'; runAttempt='1'; lineage='11111111-1111-1111-1111-111111111111'; serial=4
+            initializationScriptHash='script'; initializationBundleHash='bundle'
+        }
+        $receipt | ConvertTo-Json | Set-Content "$workspace/.autopilot-apply/receipt.json"
+        Mock Get-WorkloadInitialization { @{scriptHash='script'; bundleHash='bundle'} }
+        Mock Read-WorkloadState { @{exists=$true; lineage='11111111-1111-1111-1111-111111111111'; serial=4} }
+        Mock Invoke-WorkloadCommand {
+            param($Command)
+            if ($Command -eq 'az') { return @{id='approved'; tenantId='tenant'} }
+        }
+        Mock Invoke-WorkloadInitialization {}
+        Push-Location $workspace
+        try {
+            foreach ($name in $environment.Keys) { [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
+            Invoke-WorkloadPipeline -Stage Initialize -Configuration '.github/autopilot/retry.json'
+            Should -Invoke Invoke-WorkloadInitialization -Times 1 -Exactly
+            Should -Invoke Invoke-WorkloadCommand -Times 0 -Exactly -ParameterFilter { $Arguments -contains 'apply' -or $Arguments -contains 'plan' }
+            Mock Read-WorkloadState { @{exists=$true; lineage='11111111-1111-1111-1111-111111111111'; serial=5} }
+            { Invoke-WorkloadPipeline -Stage Initialize -Configuration '.github/autopilot/retry.json' } | Should -Throw '*State changed*'
+            Should -Invoke Invoke-WorkloadInitialization -Times 1 -Exactly
+        }
+        finally {
+            Pop-Location
+            foreach ($name in $previous.Keys) { [Environment]::SetEnvironmentVariable($name, $previous[$name]) }
+        }
+    }
+
     It 'blocks deletion, replacement, foreign subscription and governance changes in runner plans' {
         . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
         foreach ($change in @(

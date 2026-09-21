@@ -14,6 +14,7 @@ The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.p
 - Extend the official reusable CD workflow through an opt-in input, preserving its path and OIDC trust. Validate private state on the existing runner when local network access is unavailable; do not classify uninspected state as greenfield.
 - Separate planning from apply. Apply requires an explicit default-branch dispatch, a reviewed plan run ID, subscription confirmation, and matching commit/configuration/plan hashes. Block deletion, replacement, imports, governance changes and out-of-scope subscriptions/resource groups. Nested ARM deployments require a pinned template and extra confirmation.
 - Add a read-only-by-default access helper for existing deployment identities. Permission and environment changes require an explicit `-Apply` and confirmation. No runner, network, storage or identity infrastructure is bootstrapped.
+- Add an explicit `finops-v14-private` initialization contract for attached workloads. Bind the initializer and schema bundle to the reviewed plan, preserve a successful-apply receipt before initialization, and support initialization-only retries against the same main-branch revision and state serial. Verify the original GitHub apply step before accepting a retry; never replan or reapply Terraform as part of initialization.
 
 ## 1.9.0
 
