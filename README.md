@@ -5,7 +5,7 @@
 
 # ALZ Autopilot
 
-[![Version](https://img.shields.io/badge/version-1.11.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.12.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.4%2B-5391FE)](https://learn.microsoft.com/powershell/)
 
@@ -24,6 +24,7 @@ AutoPilot is a delivery companion, not a prerequisite for operating the resultin
 | [Update an attached workload](HOW-TO-USE.md#3-update-an-attached-workload) | Keep the exact root, backend, and state lineage. Preserve custom manifest fields, initialization hooks, the caller workflow, access helper, and reusable template. |
 | [Review module upgrades](HOW-TO-USE.md#4-review-module-upgrades) | Inspect release information and the local module cache, then follow a separate PR-based upgrade procedure. No module pins are edited. |
 | [Review a migration or import](HOW-TO-USE.md#5-review-a-migration-or-import) | Review ownership, backups, and the migration procedure. No imports, state commands, or bootstrap are executed. |
+| [Deploy your own configuration](HOW-TO-USE.md#6-deploy-your-own-accelerator-configuration) | Use an existing accelerator `config` folder exactly as written and adopt its bootstrap state. The accelerator only plans; AutoPilot reviews the saved plan and applies it once. |
 
 A new Azure resource can be an ordinary update to an existing Terraform root. It does not automatically need a new state or bootstrap. Existing platform changes still go through the platform repository's reviewed pipeline; do not create a second platform delivery to make an update.
 
@@ -240,6 +241,7 @@ ALZAutoPilot/
     ALZPipeline.psm1        # pipeline trigger/watch/verify + HCP readiness checks
     ALZReport.psm1          # HTML delivery report
     ALZWorkload.psm1        # workload attachment, preserved updates, and review-only operations
+    ALZOwnConfig.psm1       # deploy an existing accelerator config: plan-only run, plan review, single apply
   data/
     providers.json          # ALZ-recommended resource providers
     scenarios.json          # Terraform scenario catalog

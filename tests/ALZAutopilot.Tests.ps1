@@ -1,6 +1,6 @@
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
-    foreach ($moduleName in @('ALZUI', 'ALZSecurity', 'ALZState', 'ALZConfig', 'ALZPreflight', 'ALZOrchestrator', 'ALZPipeline', 'ALZReport', 'ALZWorkload')) {
+    foreach ($moduleName in @('ALZUI', 'ALZSecurity', 'ALZState', 'ALZConfig', 'ALZPreflight', 'ALZOrchestrator', 'ALZPipeline', 'ALZReport', 'ALZWorkload', 'ALZOwnConfig')) {
         Import-Module (Join-Path $repoRoot "modules/$moduleName.psm1") -Force
     }
 }
@@ -1362,5 +1362,311 @@ Describe 'Required schema conformance' {
     It 'fails when a required bootstrap schema is missing' {
         & (Join-Path $repoRoot 'tests/Test-ALZConfigConformance.ps1') -ModulesRoot (Join-Path $TestDrive 'missing-schema') -RequireSchema -Quiet
         $LASTEXITCODE | Should -Be 1
+    }
+}
+
+Describe 'Own configuration mode' -Tag 'OwnConfig' {
+    BeforeAll {
+        $script:dataPath = Join-Path $repoRoot 'data'
+        $script:mgmt = '11111111-1111-1111-1111-111111111111'
+        $script:conn = '22222222-2222-2222-2222-222222222222'
+        $script:tenant = '33333333-3333-3333-3333-333333333333'
+        function New-TestInputs {
+            [ordered]@{
+                iac_type                  = 'terraform'
+                bootstrap_module_name     = 'alz_github'
+                bootstrap_location        = 'westus2'
+                github_organization_name  = 'contoso'
+                subscription_ids          = @{ management = $script:mgmt; connectivity = $script:conn }
+                bootstrap_subscription_id = $script:mgmt
+                bootstrap_module_version  = 'v7.3.0'
+                starter_module_version    = 'v17.5.1'
+                apply_approvers           = @()
+                use_self_hosted_runners   = $true
+            }
+        }
+        $script:vwanWithIntent = "connectivity_type = `"virtual_wan`"`nprimary_firewall_enabled = true`nrouting_intents = {}"
+        function Invoke-TestOwnConfig {
+            param($Inputs = (New-TestInputs), [string]$InputsText = 'bootstrap_location: westus2', [string]$Platform = $script:vwanWithIntent, [string]$Default = $script:tenant, [string]$Management = $script:tenant, [string]$Plan = 'team', $Recorded)
+            Test-ALZOwnConfig -Inputs $Inputs -InputsText $InputsText -PlatformConfigText $Platform -DefaultTenantId $Default -ManagementTenantId $Management -GitHubPlan $Plan -RecordedVersions $Recorded
+        }
+        function New-TestOutput {
+            param([string]$Root, [long]$Serial = 5, [string]$Lineage = 'lineage-a', [string[]]$Versions = @('v7.3.0'))
+            $output = Join-Path $Root 'output'
+            New-Item -ItemType Directory -Path $output -Force | Out-Null
+            @{ bootstrapVersion = $Versions[0]; starterVersion = 'v17.5.1' } | ConvertTo-Json | Set-Content (Join-Path $output '.alz-version-data.json')
+            foreach ($version in $Versions) {
+                $folder = Join-Path $output "bootstrap\$version\alz\github"
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                @{ version = 4; serial = $Serial; lineage = $Lineage; resources = @(@{ type = 'a' }, @{ type = 'b' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $folder 'terraform.tfstate')
+            }
+            return $output
+        }
+    }
+
+    It 'routes option 6 to the own-configuration delivery' {
+        InModuleScope ALZWorkload {
+            Mock Read-ALZValue { '6' }
+            Mock Save-ALZState {}
+            $result = Set-ALZDeliveryType -State @{ answers = @{} }
+            $result.answers.deliveryType | Should -Be 'ownconfig'
+            $result.answers.deliveryIntent | Should -Be 'own-config'
+        }
+    }
+
+    It 'never generates configuration, interviews, or uses the prompting bootstrap' {
+        $definition = (Get-Command Invoke-ALZOwnConfigDelivery).Definition
+        $definition | Should -Not -Match '\b(Write-ALZInputsYaml|Write-ALZStarterTfvars|Invoke-ALZInterview|Invoke-ALZBootstrap)\b'
+    }
+
+    It 'accepts a complete, pinned configuration' {
+        $results = Invoke-TestOwnConfig
+        @($results | Where-Object Status -EQ 'FAIL') | Should -BeNullOrEmpty
+        @($results | Where-Object Status -EQ 'WARN') | Should -BeNullOrEmpty
+    }
+
+    It 'fails when a token key is stored in inputs.yaml' {
+        $inputs = New-TestInputs
+        $inputs['github_personal_access_token'] = 'not-a-real-token'
+        (Invoke-TestOwnConfig -Inputs $inputs | Where-Object Name -EQ 'Secrets in configuration').Status | Should -Be 'FAIL'
+    }
+
+    It 'fails when a token-like value appears in the platform config' {
+        $platform = "$script:vwanWithIntent`nnote = `"ghp_$('a' * 36)`""
+        (Invoke-TestOwnConfig -Platform $platform | Where-Object Name -EQ 'Secrets in configuration').Status | Should -Be 'FAIL'
+    }
+
+    It 'fails on example placeholders but ignores them in comments' {
+        (Invoke-TestOwnConfig -InputsText 'bootstrap_location: "<region-1>"' | Where-Object Name -EQ 'Unfilled placeholders').Status | Should -Be 'FAIL'
+        Invoke-TestOwnConfig -InputsText "# see <region-1>`nbootstrap_location: westus2" -Platform "/* <region-1> */`n$script:vwanWithIntent" |
+            Where-Object Name -EQ 'Unfilled placeholders' | Should -BeNullOrEmpty
+    }
+
+    It 'fails approvers on the GitHub Team plan and allows an empty list' {
+        $inputs = New-TestInputs
+        $inputs['apply_approvers'] = @('octocat')
+        (Invoke-TestOwnConfig -Inputs $inputs | Where-Object Name -EQ 'Apply approvers').Status | Should -Be 'FAIL'
+        (Invoke-TestOwnConfig -Inputs $inputs -Plan 'enterprise' | Where-Object Name -EQ 'Apply approvers').Status | Should -Be 'OK'
+        (Invoke-TestOwnConfig | Where-Object Name -EQ 'Apply approvers').Status | Should -Be 'OK'
+    }
+
+    It 'fails when the CLI default is another tenant or the subscription is not visible' {
+        (Invoke-TestOwnConfig -Default '44444444-4444-4444-4444-444444444444' | Where-Object Name -EQ 'Azure tenant').Status | Should -Be 'FAIL'
+        (Invoke-TestOwnConfig -Management '' | Where-Object Name -EQ 'Azure tenant').Status | Should -Be 'FAIL'
+    }
+
+    It 'warns on unpinned versions and fails on a version change against the output folder' {
+        $inputs = New-TestInputs
+        $inputs.Remove('starter_module_version')
+        (Invoke-TestOwnConfig -Inputs $inputs | Where-Object Name -EQ 'Pinned versions').Status | Should -Be 'WARN'
+        $recorded = [pscustomobject]@{ bootstrapVersion = 'v7.2.1'; starterVersion = 'v17.5.1' }
+        (Invoke-TestOwnConfig -Recorded $recorded | Where-Object Name -EQ 'Version change').Status | Should -Be 'FAIL'
+    }
+
+    It 'fails on duplicate or missing platform subscriptions' {
+        $inputs = New-TestInputs
+        $inputs['subscription_ids'] = @{ management = $script:mgmt; connectivity = $script:mgmt }
+        (Invoke-TestOwnConfig -Inputs $inputs | Where-Object Name -EQ 'Subscription IDs').Status | Should -Be 'FAIL'
+        $inputs.Remove('subscription_ids')
+        @(Invoke-TestOwnConfig -Inputs $inputs | Where-Object { $_.Name -like 'Subscription: *' -and $_.Status -eq 'FAIL' }).Count | Should -Be 2
+    }
+
+    It 'warns when a secured Virtual WAN hub has no routing intent' {
+        (Invoke-TestOwnConfig -Platform "connectivity_type = `"virtual_wan`"`nprimary_firewall_enabled = true" | Where-Object Name -EQ 'Virtual WAN routing intent').Status | Should -Be 'WARN'
+    }
+
+    It 'warns when the private DNS zone regex filter is enabled but not when it is commented out' {
+        $on = "private_link_private_dns_zones_regex_filter = {`n  enabled = true`n}"
+        (Invoke-TestOwnConfig -Platform $on | Where-Object Name -EQ 'Private DNS zone filter').Status | Should -Be 'WARN'
+        @(Invoke-TestOwnConfig -Platform ("# " + ($on -replace "`n", "`n# ")) | Where-Object Name -EQ 'Private DNS zone filter').Count | Should -Be 0
+        $trap = (Get-Content (Join-Path $script:dataPath 'traps.json') -Raw | ConvertFrom-Json).traps | Where-Object id -EQ 'private-dns-zone-filter-primary-hub'
+        "The Resource 'Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net' under resource group 'rg-dns' was not found." | Should -Match $trap.pattern
+    }
+
+    It 'derives the bootstrap state resource group name' {
+        Get-ALZOwnConfigStateResourceGroupName -Inputs (New-TestInputs) | Should -Be 'rg-alz-mgmt-state-westus2-001'
+        $inputs = New-TestInputs
+        $inputs['resource_names'] = @{ resource_group_state = 'rg-{{service_name}}-tfstate-{{postfix_number}}' }
+        $inputs['postfix_number'] = 7
+        Get-ALZOwnConfigStateResourceGroupName -Inputs $inputs | Should -Be 'rg-alz-tfstate-007'
+    }
+
+    It 'reads bootstrap state metadata and flags more than one state as ambiguous' {
+        $state = Get-ALZOwnConfigBootstrapState -OutputPath (New-TestOutput -Root (Join-Path $TestDrive 'one')) -Inputs (New-TestInputs)
+        $state.Exists | Should -BeTrue
+        $state.Serial | Should -Be 5
+        $state.Lineage | Should -Be 'lineage-a'
+        $state.ResourceCount | Should -Be 2
+        (Get-ALZOwnConfigBootstrapState -OutputPath (New-TestOutput -Root (Join-Path $TestDrive 'two') -Versions @('v7.2.1', 'v7.3.0')) -Inputs (New-TestInputs)).Ambiguous | Should -BeTrue
+    }
+
+    It 'blocks a second bootstrap when Azure has one but the folder has no state' {
+        $layout = Get-ALZOwnConfigLayout -DeliveryPath (Join-Path $TestDrive 'empty-delivery')
+        $none = [pscustomobject]@{ Exists = $false; Ambiguous = $false }
+        (Test-ALZOwnConfigAdoption -Layout $layout -BootstrapState $none -StateResourceGroupName 'rg-x' -StateResourceGroupExists $true).Status | Should -Be 'FAIL'
+        (Test-ALZOwnConfigAdoption -Layout $layout -BootstrapState $none -StateResourceGroupName 'rg-x' -StateResourceGroupExists $false).Status | Should -Be 'OK'
+        (Test-ALZOwnConfigAdoption -Layout $layout -BootstrapState $none -StateResourceGroupName 'rg-x' -StateResourceGroupExists $null).Status | Should -Be 'WARN'
+        $existing = [pscustomobject]@{ Exists = $true; Ambiguous = $false; Serial = 9; ResourceCount = 3; Lineage = 'l' }
+        (Test-ALZOwnConfigAdoption -Layout $layout -BootstrapState $existing -StateResourceGroupName 'rg-x' -StateResourceGroupExists $true).Status | Should -Be 'OK'
+    }
+
+    It 'refuses a folder that also holds a guided-bootstrap layout' {
+        $delivery = Join-Path $TestDrive 'mixed-delivery'
+        New-Item -ItemType Directory -Path (Join-Path $delivery 'bootstrap') -Force | Out-Null
+        $layout = Get-ALZOwnConfigLayout -DeliveryPath $delivery
+        $results = Test-ALZOwnConfigAdoption -Layout $layout -BootstrapState ([pscustomobject]@{ Exists = $true; Ambiguous = $false }) -StateResourceGroupName 'rg-x' -StateResourceGroupExists $true
+        ($results | Where-Object Name -EQ 'Delivery layout').Status | Should -Be 'FAIL'
+    }
+
+    It 'summarizes a plan by address and flags blocking and review changes' {
+        $plan = [pscustomobject]@{ resource_changes = @(
+                [pscustomobject]@{ address = 'module.github.github_repository_file.a'; type = 'github_repository_file'; change = [pscustomobject]@{ actions = @('update') } }
+                [pscustomobject]@{ address = 'module.azure.azurerm_public_ip.alz[0]'; type = 'azurerm_public_ip'; action_reason = 'replace_because_cannot_update'; change = [pscustomobject]@{ actions = @('delete', 'create'); replace_paths = @(, @('ip_tags')) } }
+                [pscustomobject]@{ address = 'module.azure.azurerm_storage_account.alz'; type = 'azurerm_storage_account'; change = [pscustomobject]@{ actions = @('delete') } }
+                [pscustomobject]@{ address = 'module.azure.azurerm_user_assigned_identity.plan'; type = 'azurerm_user_assigned_identity'; change = [pscustomobject]@{ actions = @('create', 'delete'); replace_paths = @(, @('name')) } }
+                [pscustomobject]@{ address = 'module.github.github_team.alz'; type = 'github_team'; change = [pscustomobject]@{ actions = @('no-op') } }
+            )
+        }
+        $review = ConvertTo-ALZOwnConfigPlanReview -Plan $plan
+        $review.Changes.Count | Should -Be 4
+        $review.Counts.update | Should -Be 1
+        $review.Counts.replace | Should -Be 2
+        $review.Counts.delete | Should -Be 1
+        $review.Blocked | Should -BeTrue
+        ($review.Findings | Where-Object Id -EQ 'public-ip-platform-ip-tags').Severity | Should -Be 'Block'
+        ($review.Findings | Where-Object Id -EQ 'delivery-resource-destroyed').Severity | Should -Be 'Block'
+        ($review.Findings | Where-Object Id -EQ 'pipeline-identity-replaced').Severity | Should -Be 'Review'
+    }
+
+    It 'flags repository file updates that change only commit metadata' {
+        $file = { param($address, $before, $after) [pscustomobject]@{ address = $address; type = 'github_repository_file'; change = [pscustomobject]@{ actions = @('update'); before = $before; after = $after } } }
+        $plan = [pscustomobject]@{ resource_changes = @(
+                (& $file 'f.meta' ([pscustomobject]@{ content = 'x'; commit_author = 'a'; commit_email = 'a' }) ([pscustomobject]@{ content = 'x'; commit_author = 'b'; commit_email = 'b' }))
+                (& $file 'f.content' ([pscustomobject]@{ content = 'x'; commit_author = 'a' }) ([pscustomobject]@{ content = 'y'; commit_author = 'b' }))
+            )
+        }
+        $review = ConvertTo-ALZOwnConfigPlanReview -Plan $plan
+        $finding = $review.Findings | Where-Object Id -EQ 'repository-file-metadata-only'
+        $finding.Severity | Should -Be 'Review'
+        $finding.Address | Should -Be '1 repository file(s)'
+        $review.Blocked | Should -BeFalse
+        ($review.Changes | Where-Object Address -EQ 'f.content').ChangedAttributes | Should -Be @('commit_author', 'content')
+    }
+
+    It 'runs the accelerator plan-only with the guard, then restores the environment' {
+        if (-not (Get-Command Deploy-Accelerator -ErrorAction SilentlyContinue)) { function global:Deploy-Accelerator { param($inputConfigFilePaths, $output_folder_path, [switch]$auto_approve, $starter_additional_files) } }
+        $delivery = Join-Path $TestDrive 'plan-delivery'
+        $output = New-TestOutput -Root $delivery
+        New-Item -ItemType Directory -Path (Join-Path $delivery 'config\lib') -Force | Out-Null
+        Set-Content (Join-Path $delivery 'config\inputs.yaml') 'iac_type: terraform'
+        Set-Content (Join-Path $delivery 'config\platform-landing-zone.tfvars') 'starter_locations = ["westus2"]'
+        $script:seen = $null
+        Mock Deploy-Accelerator -ModuleName ALZOwnConfig {
+            $script:seen = [pscustomobject]@{ Guard = $env:TF_CLI_ARGS_apply; Token = $env:TF_VAR_github_personal_access_token; Parameters = $PesterBoundParameters }
+            Set-Content (Join-Path $output_folder_path 'bootstrap\v7.3.0\alz\github\tfplan') 'plan'
+            throw 'Terraform apply failed with exit code 1 after 5 attempts.'
+        }
+        $env:TF_CLI_ARGS_apply = $null
+        $secure = ConvertTo-SecureString 'test-only-value' -AsPlainText -Force
+        $result = Invoke-ALZOwnConfigPlan -Layout (Get-ALZOwnConfigLayout -DeliveryPath $delivery) -Inputs (New-TestInputs) -VcsToken $secure -DataPath $script:dataPath 6>$null
+        $result.Succeeded | Should -BeTrue
+        $result.OutputPath | Should -Be $output
+        $script:seen.Guard | Should -Be '-alz-autopilot-plan-only-guard'
+        $script:seen.Token | Should -Be 'test-only-value'
+        $script:seen.Parameters.auto_approve | Should -BeTrue
+        $script:seen.Parameters.output_folder_path | Should -Be $output
+        @($script:seen.Parameters.starter_additional_files) | Should -Be @((Join-Path $delivery 'config\lib'))
+        $env:TF_CLI_ARGS_apply | Should -BeNullOrEmpty
+        $env:TF_VAR_github_personal_access_token | Should -BeNullOrEmpty
+        Remove-Item $result.TranscriptPath -ErrorAction SilentlyContinue
+    }
+
+    It 'fails the plan step if bootstrap state changed during a plan-only run' {
+        if (-not (Get-Command Deploy-Accelerator -ErrorAction SilentlyContinue)) { function global:Deploy-Accelerator { param($inputConfigFilePaths, $output_folder_path, [switch]$auto_approve, $starter_additional_files) } }
+        $delivery = Join-Path $TestDrive 'changed-delivery'
+        New-TestOutput -Root $delivery | Out-Null
+        Mock Deploy-Accelerator -ModuleName ALZOwnConfig {
+            $folder = Join-Path $output_folder_path 'bootstrap\v7.3.0\alz\github'
+            @{ serial = 6; lineage = 'lineage-a'; resources = @() } | ConvertTo-Json | Set-Content (Join-Path $folder 'terraform.tfstate')
+            Set-Content (Join-Path $folder 'tfplan') 'plan'
+        }
+        $result = Invoke-ALZOwnConfigPlan -Layout (Get-ALZOwnConfigLayout -DeliveryPath $delivery) -Inputs (New-TestInputs) -DataPath $script:dataPath 6>$null
+        $result.Succeeded | Should -BeFalse
+        $result.StateChanged | Should -BeTrue
+        Remove-Item $result.TranscriptPath -ErrorAction SilentlyContinue
+    }
+
+    It 'discards the plan and applies nothing when state changed after review' {
+        $delivery = Join-Path $TestDrive 'stale-delivery'
+        $output = New-TestOutput -Root $delivery -Serial 8
+        $folder = Join-Path $output 'bootstrap\v7.3.0\alz\github'
+        Set-Content (Join-Path $folder 'tfplan') 'plan'
+        $planResult = [pscustomobject]@{ PlanPath = (Join-Path $folder 'tfplan'); BootstrapFolder = $folder; OutputPath = $output; StateBefore = [pscustomobject]@{ Exists = $true; Serial = 7; Lineage = 'lineage-a' } }
+        { Invoke-ALZOwnConfigApply -PlanResult $planResult -Inputs (New-TestInputs) -ExpectedChanges 1 -DataPath $script:dataPath } | Should -Throw '*changed after the plan*'
+        Test-Path (Join-Path $folder 'tfplan') | Should -BeFalse
+    }
+
+    It 'the Terraform apply guard blocks saved-plan and retry applies without writing state' -Skip:(-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
+        $work = Join-Path $TestDrive 'guard'
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        Set-Content (Join-Path $work 'main.tf') 'resource "terraform_data" "x" { input = "guard" }'
+        & terraform "-chdir=$work" init -input=false -no-color *> $null
+        & terraform "-chdir=$work" plan -out=tfplan -input=false -no-color *> $null
+        $LASTEXITCODE | Should -Be 0
+        try {
+            $env:TF_CLI_ARGS_apply = '-alz-autopilot-plan-only-guard'
+            & terraform "-chdir=$work" apply -auto-approve -input=false tfplan *> $null
+            $LASTEXITCODE | Should -Not -Be 0
+            & terraform "-chdir=$work" apply -auto-approve -input=false *> $null
+            $LASTEXITCODE | Should -Not -Be 0
+        }
+        finally { $env:TF_CLI_ARGS_apply = $null }
+        Test-Path (Join-Path $work 'terraform.tfstate') | Should -BeFalse
+    }
+
+    It 'applies the reviewed plan once, verifies the new state, and deletes the plan' -Skip:(-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
+        $output = Join-Path $TestDrive 'apply-delivery\output'
+        $folder = Join-Path $output 'bootstrap\v7.3.0\alz\github'
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        @{ bootstrapVersion = 'v7.3.0'; starterVersion = 'v17.5.1' } | ConvertTo-Json | Set-Content (Join-Path $output '.alz-version-data.json')
+        Set-Content (Join-Path $folder 'main.tf') 'resource "terraform_data" "x" { input = "apply" }'
+        & terraform "-chdir=$folder" init -input=false -no-color *> $null
+        & terraform "-chdir=$folder" plan -out=tfplan -input=false -no-color *> $null
+        $planResult = [pscustomobject]@{ PlanPath = (Join-Path $folder 'tfplan'); BootstrapFolder = $folder; OutputPath = $output; StateBefore = [pscustomobject]@{ Exists = $false } }
+        $env:TF_CLI_ARGS_apply = '-alz-autopilot-plan-only-guard'
+        try { $result = Invoke-ALZOwnConfigApply -PlanResult $planResult -Inputs (New-TestInputs) -ExpectedChanges 1 -DataPath $script:dataPath 6>$null }
+        finally { $guardAfter = $env:TF_CLI_ARGS_apply; $env:TF_CLI_ARGS_apply = $null }
+        $result.Succeeded | Should -BeTrue
+        $result.StateAfter.Exists | Should -BeTrue
+        $result.StateAfter.ResourceCount | Should -Be 1
+        Test-Path (Join-Path $folder 'tfplan') | Should -BeFalse
+        Test-Path $result.LogPath | Should -BeTrue
+        $guardAfter | Should -Be '-alz-autopilot-plan-only-guard'
+        Remove-Item $result.LogPath -ErrorAction SilentlyContinue
+    }
+
+    It 'reports a partial apply when state advanced but Terraform returned an error' -Skip:(-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
+        $output = Join-Path $TestDrive 'partial-delivery\output'
+        $folder = Join-Path $output 'bootstrap\v7.3.0\alz\github'
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        @{ bootstrapVersion = 'v7.3.0'; starterVersion = 'v17.5.1' } | ConvertTo-Json | Set-Content (Join-Path $output '.alz-version-data.json')
+        Set-Content (Join-Path $folder 'main.tf') @'
+resource "terraform_data" "ok" { input = "ok" }
+resource "terraform_data" "bad" {
+  depends_on = [terraform_data.ok]
+  provisioner "local-exec" { command = "exit 1" }
+}
+'@
+        & terraform "-chdir=$folder" init -input=false -no-color *> $null
+        & terraform "-chdir=$folder" plan -out=tfplan -input=false -no-color *> $null
+        $planResult = [pscustomobject]@{ PlanPath = (Join-Path $folder 'tfplan'); BootstrapFolder = $folder; OutputPath = $output; StateBefore = [pscustomobject]@{ Exists = $false } }
+        $result = Invoke-ALZOwnConfigApply -PlanResult $planResult -Inputs (New-TestInputs) -ExpectedChanges 2 -DataPath $script:dataPath 6>$null
+        $result.Succeeded | Should -BeFalse
+        $result.Partial | Should -BeTrue
+        $result.ExitCode | Should -Not -Be 0
+        $result.StateAfter.Exists | Should -BeTrue
+        Test-Path $result.LogPath | Should -BeTrue
+        Test-Path (Join-Path $folder 'tfplan') | Should -BeFalse
+        Remove-Item $result.LogPath -ErrorAction SilentlyContinue
     }
 }

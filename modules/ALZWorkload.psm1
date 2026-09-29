@@ -29,9 +29,10 @@ function Set-ALZDeliveryType {
     Write-Host '    3. Update an attached workload (same root and state; preserve custom workflows)' -ForegroundColor White
     Write-Host '    4. Review official module upgrades (read-only inventory and handoff)' -ForegroundColor White
     Write-Host '    5. Review a migration or import (no state changes or deployment)' -ForegroundColor White
-    $typePick = Read-ALZValue -Prompt 'Choose (1/2/3/4/5)' -Default '2' -Validator { param($Value) $Value -in @('1', '2', '3', '4', '5') }
-    $State.answers['deliveryIntent'] = @{ '1' = 'bootstrap'; '2' = 'new-workload'; '3' = 'update-workload'; '4' = 'upgrade-review'; '5' = 'migration-review' }[$typePick]
-    $State.answers['deliveryType'] = if ($typePick -eq '1') { 'landingzone' } elseif ($typePick -in @('2', '3')) { 'workload' } else { 'maintenance' }
+    Write-Host '    6. Deploy from your own accelerator configuration (config and output folders, no interview)' -ForegroundColor White
+    $typePick = Read-ALZValue -Prompt 'Choose (1/2/3/4/5/6)' -Default '2' -Validator { param($Value) $Value -in @('1', '2', '3', '4', '5', '6') }
+    $State.answers['deliveryIntent'] = @{ '1' = 'bootstrap'; '2' = 'new-workload'; '3' = 'update-workload'; '4' = 'upgrade-review'; '5' = 'migration-review'; '6' = 'own-config' }[$typePick]
+    $State.answers['deliveryType'] = if ($typePick -eq '1') { 'landingzone' } elseif ($typePick -in @('2', '3')) { 'workload' } elseif ($typePick -eq '6') { 'ownconfig' } else { 'maintenance' }
     if ($typePick -in @('2', '3')) { $State.answers['workloadOperation'] = if ($typePick -eq '3') { 'update' } else { 'new' } }
     Save-ALZState -State $State
     return $State

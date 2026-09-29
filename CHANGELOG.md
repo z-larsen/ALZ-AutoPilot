@@ -7,6 +7,16 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.12.0
+
+- Add operation 6, **Deploy from your own accelerator configuration**. Use an existing `config` and `output` folder exactly as written, with no interview or generated files, and adopt its bootstrap state.
+- Check the configuration before anything runs: stored tokens, example placeholders, subscription IDs, CLI tenant, pinned and changed module versions, apply approvers on a GitHub Team plan, and Virtual WAN routing intent. Refuse to start a second bootstrap when delivery resources exist in Azure without local state, or when a folder mixes delivery layouts.
+- Run the accelerator plan-only. An undefined `TF_CLI_ARGS_apply` flag makes every accelerator apply attempt, including its automatic retries, fail before state is touched. Summarize the saved plan without reading values, block destructive changes to state storage, repositories, and platform-tagged public IPs, and require typed confirmation for other deletions and replacements.
+- Apply exactly the reviewed plan once, without retries, verify the state serial advanced, and delete the plan file afterwards. Save a token-scrubbed apply log, and report an apply that changed state but returned errors as partial, with the next step.
+- Warn when `private_link_private_dns_zones_regex_filter` is enabled. On the primary hub it drops global private link zones, and the DNS policy role assignments then fail with ResourceNotFound.
+- Flag repository file updates that change only commit metadata. A default branch that requires pull requests rejects them, although the content is already correct.
+- Add known-error entries for GitHub Team environment reviewers (HTTP 422), platform-added public IP tags, a declined bootstrap apply, a pipeline without an Azure client ID, and an Azure CLI default in another tenant.
+
 ## 1.11.0
 
 - Add a read-only official-release notice before delivery selection and an offline `-SkipUpdateCheck` option. Distinguish the installed ALZ PowerShell package, cached bootstrap/starter releases and repository-owned module/provider pins. Keep installed versions; missing packages require explicit exact-version installation approval.

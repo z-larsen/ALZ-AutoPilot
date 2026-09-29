@@ -7,7 +7,7 @@
 
 Use ALZ Autopilot to prepare and review Azure landing zone deliveries. For a new platform, it guides the official [Azure Landing Zones IaC Accelerator](https://azure.github.io/Azure-Landing-Zones/accelerator/). For workloads, it prepares changes in existing GitHub repositories without running bootstrap again.
 
-AutoPilot is a companion, not a prerequisite. Your repositories, Terraform configuration, remote state, and pipelines remain usable without the app. This guide describes version 1.11.0. See [the changelog](CHANGELOG.md) for changes from earlier versions.
+AutoPilot is a companion, not a prerequisite. Your repositories, Terraform configuration, remote state, and pipelines remain usable without the app. This guide describes version 1.12.0. See [the changelog](CHANGELOG.md) for changes from earlier versions.
 
 A pull request (PR) proposes a repository change for review. A Terraform plan previews infrastructure changes. An apply executes a reviewed plan. Treat code review and deployment approval as separate decisions.
 
@@ -22,6 +22,7 @@ Choose the operation based on resource ownership and Terraform state, not just w
 | Add or change resources managed by an existing workload | [3. Update an attached workload](#3-update-an-attached-workload) |
 | Assess a newer official module or provider version | [4. Review module upgrades](#4-review-module-upgrades) |
 | Import existing resources, move state, or change ownership | [5. Review a migration or import](#5-review-a-migration-or-import) |
+| Deploy an accelerator configuration you already wrote, or continue its existing bootstrap | [6. Deploy your own accelerator configuration](#6-deploy-your-own-accelerator-configuration) |
 | Change an already deployed platform, such as a policy or network setting | [Update an existing platform](#update-an-existing-platform) |
 | Diagnose access or continue an interrupted session | [Check connectivity](#check-connectivity) or [Resume a delivery](#resume-a-delivery) |
 
@@ -93,7 +94,7 @@ Use this scenario when you need the delivery infrastructure and platform configu
 
 ### Choose a platform variation
 
-The numbers below are the upstream Terraform scenario numbers, not the five operation choices in AutoPilot's startup menu. Select the matching scenario label during the platform interview. The bundled [scenario catalog](data/scenarios.json) lists all 11 options.
+The numbers below are the upstream Terraform scenario numbers, not the six operation choices in AutoPilot's startup menu. Select the matching scenario label during the platform interview. The bundled [scenario catalog](data/scenarios.json) lists all 11 options.
 
 | Variation | How to use it |
 |---|---|
@@ -188,6 +189,24 @@ Use this scenario when resources already exist but are not owned by the intended
 **Expected result:** Guidance only. The app does not run import commands, move resources or state, delete files, create a replacement backend, or bootstrap another environment.
 
 **Without AutoPilot:** Use your team's change-control process and the relevant [Terraform state](https://developer.hashicorp.com/terraform/language/state) and [import](https://developer.hashicorp.com/terraform/language/import) guidance.
+
+## 6. Deploy your own accelerator configuration
+
+Use this scenario when you already maintain the accelerator configuration yourself: hand-tuned `inputs.yaml` and platform settings, a custom library, pinned versions, or a bootstrap that stopped partway. AutoPilot uses the files exactly as written. It never runs the interview or regenerates configuration.
+
+**Prepare:** The delivery folder must use the layout that `New-AcceleratorFolderStructure` creates: `config\inputs.yaml`, `config\platform-landing-zone.tfvars` (or `.yaml` for Bicep), an optional `config\lib` folder, and an `output` folder. To continue an existing bootstrap, use the folder that holds its `output\bootstrap\...\terraform.tfstate`. Keep tokens out of the files; AutoPilot prompts for them masked.
+
+1. Start the app with that folder as `-DeliveryPath` and select **6. Deploy from your own accelerator configuration**.
+2. Review the target summary: tenant, subscriptions, organization, versions, library, and whether existing bootstrap state is adopted.
+3. Enter the bootstrap tokens when prompted. AutoPilot checks the configuration before anything runs. It stops on stored tokens, example placeholders, missing or duplicate subscriptions, a CLI default in another tenant, apply approvers on a GitHub Team plan, a module version that differs from the output folder, or delivery resources that exist in Azure without local state.
+4. Approve the plan-only run. The accelerator downloads or reuses the pinned modules and saves a Terraform plan. `TF_CLI_ARGS_apply` carries an undefined flag, so its apply attempts, including automatic retries, fail before state is touched. AutoPilot confirms the state did not change.
+5. Review the plan summary. It lists counts, resource types, and every delete or replacement with the attributes that force it; values are not displayed. Changes that would destroy state storage or repositories, or replace a public IP because the platform added an IP tag, block the apply.
+6. Approve the apply. Destructive changes require typing their count. AutoPilot applies exactly the reviewed plan once, without retries, verifies that the state serial advanced, and deletes the plan file because it contains input variables.
+7. Optionally trigger the platform CD workflow and watch it. The default is **No**. Without required reviewers, that workflow plans and applies without pausing.
+
+**Expected result:** The existing configuration is bootstrapped, or its existing bootstrap is updated, with an unchanged state lineage and an advanced serial. Nothing is applied unless you approve the reviewed plan.
+
+**Without AutoPilot:** Run `Deploy-Accelerator -inputs <inputs.yaml>,<platform config> -starterAdditionalFiles <lib> -output <output>`. Review the plan before confirming. If you decline, nothing is applied even though the command exits successfully; check the state file before assuming the bootstrap finished.
 
 ## Update an existing platform
 

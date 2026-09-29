@@ -70,7 +70,7 @@
       "pattern": "Could not update file: Changes must be made through a pull request|409.*must be made through a pull request",
       "phase": "bootstrap",
       "title": "Re-bootstrap blocked by branch protection (409 - pull request required)",
-      "remediation": "You changed bootstrap config (for example enabling private networking) and re-ran against repos that already have the accelerator's branch policy, so Terraform cannot update ci-template.yaml / cd-template.yaml / platform-landing-zone.auto.tfvars directly on main. Cleanest fix: do a FRESH bootstrap with the desired config from the start, so those files are written before branch protection exists. Alternative: temporarily remove the 'require a pull request before merging' rule on the module and templates repos, re-run, then restore it.",
+      "remediation": "You changed bootstrap config (for example enabling private networking) and re-ran against repos that already have the accelerator's branch policy, so Terraform cannot update ci-template.yaml / cd-template.yaml / platform-landing-zone.auto.tfvars directly on main. Cleanest fix: do a FRESH bootstrap with the desired config from the start, so those files are written before branch protection exists. Alternative: temporarily remove the 'require a pull request before merging' rule on the module and templates repos, re-run, then restore it. If the only rejected changes were commit author or email on existing files, the content is already correct and the error can be accepted; re-plan to confirm nothing remains.",
       "docUrl": ""
     },
     {
@@ -144,6 +144,54 @@
       "title": "File lock (often OneDrive sync) during module or temp cleanup",
       "remediation": "Pause OneDrive syncing, or move the working folder off OneDrive. These cleanup errors are usually cosmetic; verify the module/output actually landed before assuming failure.",
       "docUrl": ""
+    },
+    {
+      "id": "github-team-plan-environment-reviewers",
+      "pattern": "Failed to create the environment protection rule|billing plan supports the required reviewers",
+      "phase": "bootstrap",
+      "title": "Apply approvers are not supported on this GitHub plan",
+      "remediation": "Required reviewers on private-repository environments need GitHub Enterprise; a Team-plan organization returns HTTP 422 when the bootstrap creates the apply environment. Resources created before the error remain in state. Set apply_approvers: [] and re-run to continue, gating changes through pull-request plan review, or move the organization to Enterprise. Do not make the repositories public to obtain the feature.",
+      "docUrl": "https://docs.github.com/en/actions/reference/deployments-and-environments#required-reviewers"
+    },
+    {
+      "id": "public-ip-platform-ip-tags",
+      "pattern": "ip_tags.*forces replacement|FirstPartyUsage",
+      "phase": "bootstrap",
+      "title": "Public IP replaced because the platform added an IP tag",
+      "remediation": "Some subscriptions stamp an IP tag such as FirstPartyUsage=/Unprivileged on new public IPs. ip_tags cannot change in place, so every later plan replaces the IP (and its NAT association). Add lifecycle { ignore_changes = [ip_tags] } to the public IP in the downloaded bootstrap module, or declare the same tag, and re-apply the patch after any bootstrap version change.",
+      "docUrl": ""
+    },
+    {
+      "id": "bootstrap-apply-declined",
+      "pattern": "You have chosen not to apply the plan",
+      "phase": "bootstrap",
+      "title": "The bootstrap plan was declined, so nothing was applied",
+      "remediation": "Declining the accelerator's apply prompt exits successfully without changing state. Do not treat the run as a completed bootstrap; confirm the state serial advanced before starting the platform pipeline.",
+      "docUrl": ""
+    },
+    {
+      "id": "pipeline-client-id-missing",
+      "pattern": "Please run 'az login' to setup account|ARM_CLIENT_ID:\\s*$",
+      "phase": "pipeline",
+      "title": "The pipeline has no Azure client ID",
+      "remediation": "Terraform fell back to Azure CLI authentication because ARM_CLIENT_ID was empty. The AZURE_CLIENT_ID variables on the plan and apply environments are created late in the bootstrap; if they are missing, the bootstrap did not finish. Complete it and confirm the state advanced, rather than adding the values by hand.",
+      "docUrl": ""
+    },
+    {
+      "id": "azure-cli-wrong-tenant",
+      "pattern": "AADSTS90072|InvalidAuthenticationTokenTenant|does not exist in tenant",
+      "phase": "any",
+      "title": "Azure CLI default is signed in to a different tenant",
+      "remediation": "The accelerator and Terraform use the Azure CLI default login. Run az account set --subscription <management-subscription-id>, confirm the tenant with az account show, and set bootstrap_subscription_id explicitly.",
+      "docUrl": "https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/platform-subscriptions/"
+    },
+    {
+      "id": "private-dns-zone-filter-primary-hub",
+      "pattern": "privateDnsZones/privatelink\\.[^']*' under resource group '[^']*' was not found",
+      "phase": "pipeline",
+      "title": "Private DNS zone missing for a policy role assignment",
+      "remediation": "The primary hub has private_link_private_dns_zones_regex_filter enabled, which keeps only region-named zones, so global zones are never created and the DNS policy role assignments on them fail. Remove the filter from the primary hub (the module default leaves it off) and re-run the pipeline.",
+      "docUrl": "https://github.com/Azure/terraform-azurerm-avm-ptn-alz-connectivity-virtual-wan#private-dns-zones"
     }
   ]
 }

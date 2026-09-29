@@ -16,6 +16,8 @@
 # 3. Generate config - writes inputs.yaml (no hand-editing scattered files).
 # 4. Bootstrap - runs Deploy-Accelerator and translates known errors.
 # 5. Guided next steps - HCP state migration and the day-2 operating model.
+# Option 6 skips 1-3 and deploys an accelerator config you already own,
+# adopting its existing bootstrap state (modules/ALZOwnConfig.psm1).
 #
 # ── Parameters ──────────────────────────────────────────────
 # DeliveryPath       Root folder for this delivery's config/output/state
@@ -54,7 +56,7 @@ $modulePath = Join-Path $root 'modules'
 # Single source of truth for the app version. Shown on the splash and stamped into
 # every delivery report, so an artifact can be traced back to the build. Bump it and
 # add a CHANGELOG.md entry with each change.
-$ALZVersion = '1.11.0'
+$ALZVersion = '1.12.0'
 
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force
@@ -65,6 +67,7 @@ Import-Module (Join-Path $modulePath 'ALZOrchestrator.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZPipeline.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZReport.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZWorkload.psm1') -Force
+Import-Module (Join-Path $modulePath 'ALZOwnConfig.psm1') -Force
 
 if ($ConnectivityOnly) {
     Write-ALZSection 'Bootstrap connectivity (all supported public services)'
@@ -164,6 +167,10 @@ if ($state.answers.deliveryType -eq 'workload') {
 }
 if ($state.answers.deliveryType -eq 'maintenance') {
     Show-ALZMaintenanceReview -State $state
+    return
+}
+if ($state.answers.deliveryType -eq 'ownconfig') {
+    Invoke-ALZOwnConfigDelivery -State $state -DataPath $dataPath
     return
 }
 
