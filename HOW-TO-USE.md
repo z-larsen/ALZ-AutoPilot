@@ -156,7 +156,7 @@ Use this scenario to add or modify resources within an existing attachment. Keep
 5. Approve and inspect the local proposal. Existing initialization hooks, unknown manifest fields, the caller workflow, access helper, and reusable template are preserved. Only the attachment operation and verified lineage metadata are updated.
 6. Publish the draft PR if authorized, then follow the workload plan-review and apply procedure.
 
-**Expected result:** A reviewed change against the original state, without another bootstrap or implicit workflow upgrade. Deletion, replacement, import, and management-group changes remain blocked by the workload plan guard. Nested ARM deployments allow first creation only; updates require a separate procedure.
+**Expected result:** A reviewed change against the original state, without another bootstrap or implicit workflow upgrade. Deletion, replacement, import, management-group, tenant-scope and policy changes remain blocked by the workload plan guard. Known scopes, including whole-subscription role assignments, must stay in the manifest's approved subscriptions and resource groups. Nested ARM deployments, including AzAPI deployments, allow first creation of the pinned template only; updates require a separate procedure.
 
 **Without AutoPilot:** Create a branch in the existing repository, edit the same Terraform root, and open a PR. Use the existing workflow and state. This is also the preferred path when your established custom workflow is outside the app's supported attachment contract.
 

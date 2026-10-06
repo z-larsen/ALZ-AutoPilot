@@ -7,6 +7,13 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.12.1
+
+- Close scope gaps in the workload plan guard. A change scoped to a whole subscription (for example, a role assignment on `/subscriptions/<id>`) now has to be in an approved subscription; the earlier check matched only IDs below a subscription. The guard also checks `resource_id`, `target_resource_id` and bare subscription IDs. It blocks tenant-scope changes and known scopes in unapproved resource groups.
+- Treat policy assignments, exemptions, remediations and definitions at any scope as platform governance changes, including through AzAPI.
+- Pin AzAPI `Microsoft.Resources/deployments` and subscription-scope template deployments the same way as resource group template deployments. They must embed an approved template, create only, and never use Complete mode. Tenant-scope template deployments are blocked.
+- Re-apply the updated reusable template so existing workload pipelines get the stronger guard. An unchanged pipeline keeps the older checks.
+
 ## 1.12.0
 
 - Add operation 6, **Deploy from your own accelerator configuration**. Use an existing `config` and `output` folder exactly as written, with no interview or generated files, and adopt its bootstrap state.

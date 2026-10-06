@@ -538,6 +538,61 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         { Test-WorkloadPlan -Plan @{ resource_changes = @($change) } -AllowedSubscriptions @('approved') -ApprovedTemplateHashes @($approvedHash) -TemplateRoot $templateFolder } | Should -Throw '*pinned template*'
     }
 
+    It 'checks whole-subscription, tenant and resource-group scopes against the approved scope' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $approved = '11111111-1111-1111-1111-111111111111'
+        $foreign = '22222222-2222-2222-2222-222222222222'
+        $new = { param($type, $after) @{ mode = 'managed'; address = "$type.example"; type = $type; change = @{ actions = @('create'); after = $after } } }
+        foreach ($blocked in @(
+            (& $new 'azurerm_role_assignment' @{ scope = "/subscriptions/$foreign"; role_definition_name = 'Owner' }),
+            (& $new 'azapi_resource' @{ type = 'Microsoft.Authorization/roleAssignments@2022-04-01'; parent_id = "/subscriptions/$foreign" }),
+            (& $new 'azurerm_consumption_budget_subscription' @{ subscription_id = $foreign }),
+            (& $new 'azurerm_monitor_diagnostic_setting' @{ target_resource_id = "/subscriptions/$foreign/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv" }),
+            (& $new 'azurerm_role_assignment' @{ scope = '/' }),
+            (& $new 'azapi_resource' @{ type = 'Microsoft.Authorization/roleAssignments@2022-04-01'; parent_id = '/providers/Microsoft.Billing/billingAccounts/1' })
+        )) {
+            { Test-WorkloadPlan -Plan @{ resource_changes = @($blocked) } -AllowedSubscriptions @($approved) } | Should -Throw '*outside*'
+        }
+        $reader = & $new 'azurerm_role_assignment' @{ scope = "/subscriptions/$approved"; role_definition_name = 'Cost Management Reader' }
+        @(Test-WorkloadPlan -Plan @{ resource_changes = @($reader) } -AllowedSubscriptions @($approved) -AllowedResourceGroups @('rg-workload')).Count | Should -Be 1
+        $stateGroup = & $new 'azurerm_role_assignment' @{ scope = "/subscriptions/$approved/resourceGroups/rg-state/providers/Microsoft.Storage/storageAccounts/st" }
+        { Test-WorkloadPlan -Plan @{ resource_changes = @($stateGroup) } -AllowedSubscriptions @($approved) -AllowedResourceGroups @('rg-workload') } | Should -Throw '*unapproved resource group*'
+        foreach ($policy in @(
+            (& $new 'azurerm_resource_group_policy_exemption' @{ resource_group_id = "/subscriptions/$approved/resourceGroups/rg-workload" }),
+            (& $new 'azurerm_resource_policy_assignment' @{ resource_id = "/subscriptions/$approved/resourceGroups/rg-workload/providers/Microsoft.Storage/storageAccounts/st" }),
+            (& $new 'azapi_resource' @{ type = 'Microsoft.Authorization/policyExemptions@2022-07-01-preview'; parent_id = "/subscriptions/$approved/resourceGroups/rg-workload" })
+        )) {
+            { Test-WorkloadPlan -Plan @{ resource_changes = @($policy) } -AllowedSubscriptions @($approved) } | Should -Throw '*governance*'
+        }
+    }
+
+    It 'pins AzAPI and subscription-scope nested deployments to the reviewed template' {
+        . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
+        $templateFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'pinned-azapi')).FullName
+        $templatePath = Join-Path $templateFolder 'azuredeploy.json'
+        Set-Content -LiteralPath $templatePath -Value '{ "contentVersion": "1.0.0.0", "parameters": { "start": { "type": "string", "defaultValue": "2023-01-01T01:01:00" } }, "resources": [] }'
+        $approvedHash = (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $pinned = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $deployment = { param($template, $mode = 'Incremental', $actions = @('create')) @{ mode = 'managed'; address = 'azapi_resource.hub'; type = 'azapi_resource'; change = @{ actions = $actions; after = @{ type = 'Microsoft.Resources/deployments@2025-04-01'; body = @{ properties = @{ mode = $mode; template = $template } } } } } }
+        $check = { param($change) Test-WorkloadPlan -Plan @{ resource_changes = @($change) } -AllowedSubscriptions @('approved') -ApprovedTemplateHashes @($approvedHash) -TemplateRoot $templateFolder }
+        @(& $check (& $deployment $pinned)).Count | Should -Be 1
+        { Test-WorkloadPlan -Plan @{ resource_changes = @(& $deployment $pinned) } -AllowedSubscriptions @('approved') } | Should -Throw '*pinned template*'
+        $changed = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $changed.resources = @(@{ type = 'Microsoft.Authorization/roleAssignments'; apiVersion = '2022-04-01'; name = 'escalate' })
+        { & $check (& $deployment $changed) } | Should -Throw '*pinned template*'
+        { & $check (& $deployment $pinned 'Incremental' @('update')) } | Should -Throw '*pinned template*'
+        { & $check (& $deployment $pinned 'Complete') } | Should -Throw '*Complete-mode*'
+        $linked = & $deployment $null
+        $linked.change.after.body.properties.templateLink = @{ uri = 'https://example.invalid/template.json' }
+        { & $check $linked } | Should -Throw '*embed its pinned template*'
+        $unknown = & $deployment $null
+        { & $check $unknown } | Should -Throw '*pinned template*'
+        $subscriptionScope = @{ mode = 'managed'; address = 'azurerm_subscription_template_deployment.x'; type = 'azurerm_subscription_template_deployment'; change = @{ actions = @('create'); after = @{ template_content = '{"resources":[{"type":"Microsoft.Authorization/roleAssignments"}]}' } } }
+        { & $check $subscriptionScope } | Should -Throw '*pinned template*'
+        $tenantScope = @{ mode = 'managed'; address = 'azurerm_tenant_template_deployment.x'; type = 'azurerm_tenant_template_deployment'; change = @{ actions = @('create'); after = @{ template_content = '{}' } } }
+        { & $check $tenantScope } | Should -Throw '*governance*'
+    }
+
     It 'allows only a pristine initialized new state after checking every target group is absent' {
         . (Join-Path $repoRoot 'data/workload-pipeline.ps1')
         $oldRunnerTemp = $env:RUNNER_TEMP

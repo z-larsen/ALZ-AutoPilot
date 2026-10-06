@@ -34,6 +34,24 @@ function Invoke-WorkloadCommand {
     }
 }
 
+function Test-WorkloadPinnedTemplate {
+    param([object]$Template, [string[]]$ApprovedTemplateHashes, [string]$TemplateRoot)
+    if ($null -eq $Template -or ($Template -is [string] -and -not $Template) -or @($ApprovedTemplateHashes).Count -eq 0) { return $false }
+    $text = if ($Template -is [string]) { $Template } else { ConvertTo-Json -InputObject $Template -Depth 100 -Compress -WarningAction Stop }
+    if ($Template -is [string]) {
+        $templateHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text))).ToLowerInvariant()
+        if ($templateHash -in $ApprovedTemplateHashes) { return $true }
+    }
+    if (-not $TemplateRoot) { return $false }
+    $plannedTemplate = [Text.Json.Nodes.JsonNode]::Parse($text)
+    foreach ($file in Get-ChildItem -LiteralPath $TemplateRoot -Filter '*.json' -Recurse -File) {
+        if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -notin $ApprovedTemplateHashes) { continue }
+        $approvedTemplate = [Text.Json.Nodes.JsonNode]::Parse([IO.File]::ReadAllText($file.FullName))
+        if ([Text.Json.Nodes.JsonNode]::DeepEquals($plannedTemplate, $approvedTemplate)) { return $true }
+    }
+    return $false
+}
+
 function Test-WorkloadPlan {
     param([System.Collections.IDictionary]$Plan, [string[]]$AllowedSubscriptions, [string[]]$AllowedResourceGroups = @(), [string[]]$ApprovedTemplateHashes = @(), [string]$TemplateRoot)
     if ($Plan.errored -or $Plan.complete -eq $false) { throw 'An errored or incomplete Terraform plan cannot be applied.' }
@@ -53,26 +71,35 @@ function Test-WorkloadPlan {
     $changes = @($Plan.resource_changes | Where-Object { $_.mode -eq 'managed' -and ($_.change.actions -join ',') -ne 'no-op' })
     foreach ($change in $changes) {
         if ($change.change.actions -contains 'delete' -or $change.change.importing) { throw "Deletion, replacement, or import requires a separate reviewed migration: $($change.address)" }
-        foreach ($resourceId in @($change.change.before.id, $change.change.after.id, $change.change.after.parent_id, $change.change.after.scope, $change.change.after.subscription_id)) {
-            if ($resourceId -match '^/subscriptions/([^/]+)/' -and $Matches[1] -notin $AllowedSubscriptions) { throw "A resource is outside the approved subscriptions: $($change.address)" }
+        $after = $change.change.after
+        $subscriptionField = "$($after.subscription_id)"
+        if ($subscriptionField -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $subscriptionField = "/subscriptions/$subscriptionField" }
+        # Scopes unknown until apply are absent here; known ones must stay inside the approved subscriptions.
+        foreach ($resourceId in @($change.change.before.id, $after.id, $after.parent_id, $after.scope, $after.resource_id, $after.target_resource_id, $subscriptionField)) {
+            if ($resourceId -isnot [string] -or -not $resourceId) { continue }
+            if ($resourceId -match '^/subscriptions/([^/]+)(/|$)' -and $Matches[1] -notin $AllowedSubscriptions) { throw "A resource is outside the approved subscriptions: $($change.address)" }
             if ($resourceId -match '^/providers/Microsoft.Management/managementGroups/') { throw "Management-group changes are outside this workload: $($change.address)" }
+            if ($resourceId -eq '/' -or $resourceId -match '^/providers/') { throw "Tenant-scope changes are outside this workload: $($change.address)" }
+            if ($AllowedResourceGroups.Count -gt 0 -and $resourceId -match '^/subscriptions/[^/]+/resourceGroups/([^/]+)' -and $Matches[1] -notin $AllowedResourceGroups) { throw "A resource targets an unapproved resource group: $($change.address)" }
         }
-        if ($change.type -match 'management_group|subscription_policy|management_group_policy' -or ($change.type -eq 'azapi_resource' -and $change.change.after.type -like 'Microsoft.Management/*')) { throw "Platform governance changes are outside this workload: $($change.address)" }
-        $groupName = if ($change.type -eq 'azurerm_resource_group') { $change.change.after.name } else { $change.change.after.resource_group_name }
+        if ($change.type -match 'management_group|subscription_policy|management_group_policy|tenant_template_deployment|_policy_(assignment|exemption|remediation)$|^azurerm_policy_(set_)?definition$' -or ($change.type -eq 'azapi_resource' -and $after.type -match '^Microsoft\.(Management/|Authorization/policy)')) { throw "Platform governance changes are outside this workload: $($change.address)" }
+        $groupName = if ($change.type -eq 'azurerm_resource_group') { $after.name } else { $after.resource_group_name }
         if ($AllowedResourceGroups.Count -gt 0 -and $groupName -and $groupName -notin $AllowedResourceGroups) { throw "A resource targets an unapproved resource group: $($change.address)" }
-        if ($change.type -eq 'azurerm_resource_group_template_deployment') {
-            $templateHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$($change.change.after.template_content)"))).ToLowerInvariant()
-            $verifiedTemplate = $templateHash -in $ApprovedTemplateHashes
-            if (-not $verifiedTemplate -and $TemplateRoot -and $ApprovedTemplateHashes.Count -gt 0) {
-                $plannedTemplate = [Text.Json.Nodes.JsonNode]::Parse([string]$change.change.after.template_content)
-                foreach ($file in Get-ChildItem -LiteralPath $TemplateRoot -Filter '*.json' -Recurse -File) {
-                    if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -notin $ApprovedTemplateHashes) { continue }
-                    $approvedTemplate = [Text.Json.Nodes.JsonNode]::Parse([IO.File]::ReadAllText($file.FullName))
-                    if ([Text.Json.Nodes.JsonNode]::DeepEquals($plannedTemplate, $approvedTemplate)) { $verifiedTemplate = $true; break }
-                }
-            }
-            if (-not $verifiedTemplate -or ($change.change.actions -join ',') -ne 'create') { throw 'A nested ARM deployment requires a pinned template and a separate review for updates.' }
+        $nestedTemplate = $null
+        $nestedMode = ''
+        if ($change.type -match '^azurerm_(resource_group|subscription)_template_deployment$') {
+            $nestedTemplate = "$($after.template_content)"
+            $nestedMode = "$($after.deployment_mode)"
         }
+        elseif ($change.type -eq 'azapi_resource' -and $after.type -match '^Microsoft\.Resources/deployments@') {
+            $body = if ($after.body -is [string]) { $after.body | ConvertFrom-Json -AsHashtable -Depth 100 } else { $after.body }
+            if ($body.properties.templateLink) { throw "A nested ARM deployment must embed its pinned template: $($change.address)" }
+            $nestedTemplate = $body.properties.template
+            $nestedMode = "$($body.properties.mode)"
+        }
+        else { continue }
+        if ($nestedMode -eq 'Complete') { throw "Complete-mode deployments can delete resources and need a separate reviewed migration: $($change.address)" }
+        if (($change.change.actions -join ',') -ne 'create' -or -not (Test-WorkloadPinnedTemplate -Template $nestedTemplate -ApprovedTemplateHashes $ApprovedTemplateHashes -TemplateRoot $TemplateRoot)) { throw 'A nested ARM deployment requires a pinned template and a separate review for updates.' }
     }
     return @($changes | ForEach-Object { [pscustomobject]@{ Address = $_.address; Actions = $_.change.actions -join ',' } })
 }
