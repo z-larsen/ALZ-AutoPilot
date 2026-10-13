@@ -711,6 +711,12 @@ jobs:
                     else { $trigger['paths-ignore'] = @($trigger['paths-ignore']) + $excludedPaths | Where-Object { $_ } | Select-Object -Unique }
                 }
             }
+            if (-not $DisablePlaceholder) {
+                foreach ($job in @($workflow.jobs.Values)) {
+                    # A caller must grant every permission the called workflow's jobs request, even jobs that are skipped.
+                    if ($job -is [System.Collections.IDictionary] -and "$($job.uses)" -match '/\.github/workflows/cd-template\.yaml@' -and $job.permissions -is [System.Collections.IDictionary]) { $job.permissions['actions'] = 'read' }
+                }
+            }
             ($workflow | ConvertTo-Yaml -Options DisableAliases).TrimEnd() | Set-Content -LiteralPath $path -Encoding UTF8
         }
     }

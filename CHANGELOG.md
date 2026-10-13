@@ -7,6 +7,11 @@ Versioning follows [semantic versioning](https://semver.org/): **MAJOR** for bre
 
 The version is defined once, in `$ALZVersion` at the top of `Start-ALZDelivery.ps1`. It appears on the splash screen and in the footer of every delivery report, so an artifact can always be traced back to the build that produced it.
 
+## 1.12.2
+
+- Fix applying a reviewed workload plan. A saved Terraform plan embeds its backend settings, and the pipeline wrote the plan job's client ID into them. The apply job then reached state storage as the plan identity, which the apply environment doesn't trust, and `terraform apply` failed after every check had passed. Both jobs now authenticate through `ARM_CLIENT_ID`.
+- Give the platform CD caller `actions: read` when the shared template is extended. A caller must grant every permission a called job requests, even for jobs that are skipped, so without it every platform CD run ended in `startup_failure`.
+
 ## 1.12.1
 
 - Close scope gaps in the workload plan guard. A change scoped to a whole subscription (for example, a role assignment on `/subscriptions/<id>`) now has to be in an approved subscription; the earlier check matched only IDs below a subscription. The guard also checks `resource_id`, `target_resource_id` and bare subscription IDs. It blocks tenant-scope changes and known scopes in unapproved resource groups.

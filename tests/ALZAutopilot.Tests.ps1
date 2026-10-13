@@ -484,15 +484,20 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
         Mock Get-WorkloadInitialization { @{scriptHash='script'; bundleHash='bundle'} }
         Mock Read-WorkloadState { @{exists=$true; lineage='11111111-1111-1111-1111-111111111111'; serial=4} }
         Mock Invoke-WorkloadCommand {
-            param($Command)
+            param($Command, $Arguments)
+            $configArgument = @($Arguments) | Where-Object { $_ -like '-backend-config=*' } | Select-Object -First 1
+            if ($configArgument) { $script:backendFileText = Get-Content -LiteralPath $configArgument.Substring('-backend-config='.Length) -Raw }
             if ($Command -eq 'az') { return @{id='approved'; tenantId='tenant'} }
         }
         Mock Invoke-WorkloadInitialization {}
+        $script:backendFileText = $null
         Push-Location $workspace
         try {
             foreach ($name in $environment.Keys) { [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
             Invoke-WorkloadPipeline -Stage Initialize -Configuration '.github/autopilot/retry.json'
             Should -Invoke Invoke-WorkloadInitialization -Times 1 -Exactly
+            $script:backendFileText | Should -Match '"use_oidc"'
+            $script:backendFileText | Should -Not -Match 'client_id|apply-client'
             Should -Invoke Invoke-WorkloadCommand -Times 0 -Exactly -ParameterFilter { $Arguments -contains 'apply' -or $Arguments -contains 'plan' }
             Mock Read-WorkloadState { @{exists=$true; lineage='11111111-1111-1111-1111-111111111111'; serial=5} }
             { Invoke-WorkloadPipeline -Stage Initialize -Configuration '.github/autopilot/retry.json' } | Should -Throw '*State changed*'
@@ -679,6 +684,29 @@ Describe 'Workload attachment safety' -Tag 'Workload' {
             $workflow.on.push['paths-ignore'] | Should -Contain 'workloads/hub/**'
             $workflow.jobs.terraform.uses | Should -Be 'contoso/platform-templates/.github/workflows/cd-template.yaml@main'
             $workflow.on.Contains('workflow_dispatch') | Should -BeTrue
+        }
+    }
+
+    It 'grants the platform CD caller the permissions the extended reusable workflow requests' {
+        InModuleScope ALZWorkload -Parameters @{ TestRoot = $TestDrive } {
+            param($TestRoot)
+            Import-Module powershell-yaml
+            $checkout = (New-Item -ItemType Directory -Path (Join-Path $TestRoot ([guid]::NewGuid().ToString('N'))) -Force).FullName
+            $folder = (New-Item -ItemType Directory -Path (Join-Path $checkout '.github/workflows') -Force).FullName
+            $granted = { [ordered]@{ 'id-token' = 'write'; contents = 'read' } }
+            @{ on = @{ push = @{ branches = @('main') } }; jobs = [ordered]@{
+                deploy = [ordered]@{ uses = 'contoso/platform-templates/.github/workflows/cd-template.yaml@main'; permissions = (& $granted) }
+                inherited = [ordered]@{ uses = 'contoso/platform-templates/.github/workflows/cd-template.yaml@main' }
+            } } | ConvertTo-Yaml | Set-Content (Join-Path $folder 'cd.yaml')
+            @{ on = @{ pull_request = @{ branches = @('main') } }; jobs = @{ validate = @{ uses = 'contoso/platform-templates/.github/workflows/ci-template.yaml@main'; permissions = (& $granted) } } } | ConvertTo-Yaml | Set-Content (Join-Path $folder 'ci.yaml')
+            Protect-ALZWorkloadLegacyTriggers -Checkout $checkout -Root 'workloads/hub'
+            $cd = Get-Content (Join-Path $folder 'cd.yaml') -Raw | ConvertFrom-Yaml
+            $cd.jobs.deploy.permissions.actions | Should -Be 'read'
+            $cd.jobs.deploy.permissions['id-token'] | Should -Be 'write'
+            $cd.jobs.deploy.permissions.contents | Should -Be 'read'
+            $cd.jobs.inherited.Contains('permissions') | Should -BeFalse
+            $ci = Get-Content (Join-Path $folder 'ci.yaml') -Raw | ConvertFrom-Yaml
+            $ci.jobs.validate.permissions.Contains('actions') | Should -BeFalse
         }
     }
 

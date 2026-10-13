@@ -216,6 +216,7 @@ function Invoke-WorkloadPipeline {
     if ($Stage -eq 'Apply' -and (Test-Path -LiteralPath $applyArtifact)) { Remove-Item -LiteralPath $applyArtifact -Recurse -Force }
     $backendFile = Join-Path $env:RUNNER_TEMP ("backend-$Stage-$env:GITHUB_RUN_ID.json")
     $backend = $config.backend
+    # No client_id: a saved plan embeds these settings, and the apply job must sign in as its own identity through ARM_CLIENT_ID.
     @{
         resource_group_name = $backend.resourceGroup
         storage_account_name = $backend.storageAccount
@@ -223,7 +224,6 @@ function Invoke-WorkloadPipeline {
         key = $backend.key
         subscription_id = $backend.subscriptionId
         tenant_id = $backend.tenantId
-        client_id = $env:ARM_CLIENT_ID
         use_oidc = $true
         use_azuread_auth = $true
     } | ConvertTo-Json | Set-Content -LiteralPath $backendFile -Encoding UTF8
