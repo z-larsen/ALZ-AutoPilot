@@ -289,6 +289,69 @@ function Register-ALZResourceProviders {
     }
 }
 
+function Get-ALZGitHubSecurityFindings {
+    param([System.Collections.IDictionary]$Snapshot, [ValidateSet('learning', 'production')][string]$Profile = 'production')
+    $riskStatus = if ($Profile -eq 'production') { 'FAIL' } else { 'WARN' }
+    $plan = [string]$Snapshot.Organization.plan.name
+    $environmentDoc = 'https://docs.github.com/en/actions/reference/deployments-and-environments'
+    $secureDoc = 'https://docs.github.com/en/actions/reference/security/secure-use'
+    if ($Snapshot.Repository.private -ne $true) { New-ALZCheckResult 'Private workload repository' 'FAIL' 'Private repository access is absent or unverified.' 'Keep workload code and sensitive plan artifacts in a private repository.' $secureDoc }
+    else { New-ALZCheckResult 'Private workload repository' 'OK' 'Repository is private. This does not prevent authorized readers from cloning it.' }
+    if ($Snapshot.Organization.two_factor_requirement_enabled -ne $true) { New-ALZCheckResult 'Organization 2FA' $riskStatus 'Organization-wide 2FA is disabled or could not be verified.' 'Review account recovery and collaborators before enforcing secure 2FA. AutoPilot does not change this setting.' $secureDoc }
+    else { New-ALZCheckResult 'Organization 2FA' 'OK' 'Organization requires 2FA.' }
+    if ($Snapshot.Organization.default_repository_permission -ne 'none' -or $Snapshot.Organization.members_can_create_public_repositories -ne $false) { New-ALZCheckResult 'Organization access' $riskStatus 'Least-privilege base access or public repository creation restrictions are absent or unverified.' 'Review base permission None and explicit team grants; restrict public repository creation.' $secureDoc }
+    foreach ($entry in @(@{ Name = 'Workload'; Protection = $Snapshot.Protection }, @{ Name = 'Reusable workflow'; Protection = $Snapshot.TemplateProtection })) {
+        $protection = $entry.Protection
+        if ($protection.required_pull_request_reviews.required_approving_review_count -lt 1 -or $protection.enforce_admins.enabled -ne $true) { New-ALZCheckResult "$($entry.Name) PR review" $riskStatus 'Independent PR review and administrator enforcement are absent or unverified.' 'Require PR review and enforce protections. If rulesets enforce this instead, inspect them separately; this check does not certify ruleset equivalence.' $secureDoc }
+        if ($protection.required_pull_request_reviews.require_code_owner_reviews -ne $true) { New-ALZCheckResult "$($entry.Name) code ownership" $riskStatus 'Code-owner review is absent or unverified.' 'Protect workflows, access configuration and CODEOWNERS with required owner review.' $secureDoc }
+        if (@($protection.required_status_checks.contexts).Where({ $_ }).Count + @($protection.required_status_checks.checks).Where({ $_ }).Count -lt 1) { New-ALZCheckResult "$($entry.Name) required checks" $riskStatus 'Required status checks are absent or unverified.' 'Require the actual applicable validation checks; do not select path-filtered checks that never run for some PRs.' $secureDoc }
+        if ($protection.allow_force_pushes.enabled -ne $false -or $protection.allow_deletions.enabled -ne $false) { New-ALZCheckResult "$($entry.Name) history protection" $riskStatus 'Force-push and deletion protection are absent or unverified.' 'Protect the default branch against force pushes and deletion.' $secureDoc }
+    }
+    if ($Snapshot.Actions.default_workflow_permissions -ne 'read' -or $Snapshot.Actions.can_approve_pull_request_reviews -ne $false) { New-ALZCheckResult 'Workflow token defaults' $riskStatus 'Read-only defaults and disabled automated approvals are absent or unverified.' 'Use read-only defaults and keep workflow PR approvals disabled. Individual jobs can request extra permissions; review workflow code.' $secureDoc }
+    $policy = $Snapshot.Environment.deployment_branch_policy
+    $rules = @($Snapshot.EnvironmentBranches.branch_policies)
+    if ($policy.custom_branch_policies -ne $true -or $rules.Count -ne 1 -or $rules[0].name -cne $Snapshot.Branch -or $rules[0].type -cne 'branch') { New-ALZCheckResult 'Apply branch restriction' $riskStatus 'An exact default-branch-only apply environment could not be verified.' 'Configure a selected branch rule for the default branch on the apply environment. Do not apply that restriction to PR-plan environments.' $environmentDoc }
+    else { New-ALZCheckResult 'Apply branch restriction' 'OK' 'The apply environment allows only the selected default branch.' }
+    $reviewRules = @($Snapshot.Environment.protection_rules | Where-Object type -EQ 'required_reviewers')
+    if ($plan -in @('free', 'team', 'pro')) {
+        New-ALZCheckResult 'Deployment approval capability' $riskStatus "GitHub $plan does not support required deployment reviewers for private repositories. Manual dispatch is not independent approval." 'Use an Enterprise private-environment gate or a separately governed deployment system. Learning mode may prepare a proposal, but does not claim independent approval.' $environmentDoc
+    }
+    elseif ($plan -notin @('enterprise', 'business') -or $reviewRules.Count -ne 1 -or @($reviewRules[0].reviewers).Count -lt 1 -or $reviewRules[0].prevent_self_review -ne $true -or $Snapshot.Environment.can_admins_bypass -ne $false) {
+        New-ALZCheckResult 'Deployment approval capability' $riskStatus 'Plan capability, independent environment reviewers, self-review prevention or no-bypass enforcement is unverified.' 'Verify the actual apply environment rules. Do not infer approval protection merely because an environment exists.' $environmentDoc
+    }
+    else { New-ALZCheckResult 'Deployment approval capability' 'OK' 'Required environment reviewers, prevention of self-review and disabled administrator bypass are configured.' }
+    foreach ($name in $Snapshot.Unavailable) { New-ALZCheckResult "Security evidence: $name" $riskStatus 'The read-only API request was denied or returned incomplete data.' 'Inspect this setting manually. Do not expand token permissions automatically or treat missing evidence as a pass.' }
+}
+
+function Test-ALZWorkloadGitHubSecurity {
+    param([string]$Repository, [string]$Branch, [System.Collections.IDictionary]$Pipeline, [string]$Token)
+    if ($Repository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$' -or $Pipeline.templatesRepository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') { throw 'Select explicit workload and templates repositories for security review.' }
+    $profile = if ($Pipeline.securityProfile) { $Pipeline.securityProfile } else { 'production' }
+    $headers = @{ Authorization = "Bearer $Token"; 'User-Agent' = 'ALZ-AutoPilot'; Accept = 'application/vnd.github+json' }
+    $snapshot = @{ Branch = $Branch; Unavailable = @() }
+    $environment = [uri]::EscapeDataString($Pipeline.applyEnvironment)
+    $branchName = [uri]::EscapeDataString($Branch)
+    $requests = [ordered]@{
+        Organization = "orgs/$($Repository.Split('/')[0])"
+        Repository = "repos/$Repository"
+        Protection = "repos/$Repository/branches/$branchName/protection"
+        Templates = "repos/$($Pipeline.templatesRepository)"
+        Actions = "repos/$Repository/actions/permissions/workflow"
+        Environment = "repos/$Repository/environments/$environment"
+        EnvironmentBranches = "repos/$Repository/environments/$environment/deployment-branch-policies?per_page=100"
+    }
+    foreach ($request in $requests.GetEnumerator()) {
+        try { $snapshot[$request.Key] = Invoke-RestMethod -Uri "https://api.github.com/$($request.Value)" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop }
+        catch { $snapshot.Unavailable += $request.Key }
+    }
+    if ($snapshot.Templates.default_branch) {
+        try { $snapshot.TemplateProtection = Invoke-RestMethod -Uri "https://api.github.com/repos/$($Pipeline.templatesRepository)/branches/$([uri]::EscapeDataString($snapshot.Templates.default_branch))/protection" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop }
+        catch { $snapshot.Unavailable += 'TemplateProtection' }
+    }
+    else { $snapshot.Unavailable += 'TemplateProtection' }
+    Get-ALZGitHubSecurityFindings -Snapshot $snapshot -Profile $profile
+}
+
 function Test-ALZGitHubToken {
     param([string]$Token, [string]$Org, [bool]$SelfHostedRunners)
     if (-not $Token) {
@@ -307,21 +370,22 @@ function Test-ALZGitHubToken {
         $orgInfo = Invoke-RestMethod -Uri "https://api.github.com/orgs/$Org" -Headers $headers -Method Get -ErrorAction Stop
         $planName = if ($orgInfo.plan) { $orgInfo.plan.name } else { 'unknown' }
         if ($planName -eq 'free') {
-            $results += New-ALZCheckResult "GitHub org: $Org" 'WARN' "Reachable (free plan)" 'A free org makes the accelerator repos public. Fine for a rehearsal; use a paid/EMU org for anything real.' 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
+            $results += New-ALZCheckResult "GitHub org: $Org" 'WARN' "Reachable (free plan)" 'The accelerator may create public repositories for a free organization. Do not publish customer configuration, state, plans or secrets. Use private repositories on a suitable paid plan for sensitive deployments.' 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
             # A free org forces public repos, and self-hosted runners then execute inside the
             # VNet that reaches the state storage. GitHub advises against that pairing because
             # a fork pull request can run code on the runner.
             if ($SelfHostedRunners) {
-                $results += New-ALZCheckResult 'Public repos + self-hosted runners' 'WARN' 'A free org makes the repos public, and self-hosted runners run inside your VNet' 'GitHub recommends self-hosted runners only on private repositories, because a fork pull request can run code on the runner, which here has private-endpoint access to the Terraform state. Mitigate by setting Settings > Actions > "Require approval for all external contributors", or remove the exposure with a paid org and private repos, or by not using self-hosted runners.' 'https://docs.github.com/en/actions/reference/security/secure-use'
+                $results += New-ALZCheckResult 'Public repos + self-hosted runners' 'WARN' 'Public repository code can execute inside a runner network with sensitive access.' 'Do not run untrusted PR code on persistent privileged runners. Use private repositories and isolated clean execution pools; external-contributor approval alone is not isolation.' 'https://docs.github.com/en/actions/reference/security/secure-use'
             }
         }
         else {
             $results += New-ALZCheckResult "GitHub org: $Org" 'OK' "Reachable (plan: $planName)"
         }
+        if ($planName -eq 'team') { $results += New-ALZCheckResult 'Private deployment approval' 'WARN' 'GitHub Team supports private environments, but not required deployment reviewers on private repositories.' 'Do not treat an environment or manual workflow dispatch as an independent approval gate. Enterprise is required for that private-repository feature.' 'https://docs.github.com/en/actions/reference/deployments-and-environments#required-reviewers' }
     }
     catch {
         $code = $_.Exception.Response.StatusCode.value__
-        $rem = if ($code -eq 403) { 'The org likely enforces SAML SSO. Authorize the token for the org on github.com/settings/tokens, or use a dedicated free org for rehearsals.' } else { "Confirm the org name is correct and the token's Resource owner is this org." }
+        $rem = "Confirm the organization, token resource owner, approval and required permissions. HTTP $code does not establish whether SSO is the cause; do not widen permissions automatically."
         $results += New-ALZCheckResult "GitHub org: $Org" 'FAIL' "Org not accessible (HTTP $code)" $rem 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
     }
     # The accelerator reads org members and manages the approver team, which needs Organization > Members.
@@ -490,4 +554,4 @@ function Test-ALZHcpWorkspace {
     }
 }
 
-Export-ModuleMember -Function New-ALZCheckResult, Test-ALZConnectivity, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace
+Export-ModuleMember -Function New-ALZCheckResult, Test-ALZConnectivity, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Get-ALZGitHubSecurityFindings, Test-ALZWorkloadGitHubSecurity, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace

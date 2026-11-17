@@ -42,6 +42,7 @@ param(
     [switch]$SkipPreflight,
     [switch]$NoClear,
     [switch]$ConnectivityOnly,
+    [switch]$SkipUpdateCheck,
     [ValidateRange(1, 60)][int]$ConnectivityTimeoutSeconds = 10
 )
 
@@ -53,7 +54,7 @@ $modulePath = Join-Path $root 'modules'
 # Single source of truth for the app version. Shown on the splash and stamped into
 # every delivery report, so an artifact can be traced back to the build. Bump it and
 # add a CHANGELOG.md entry with each change.
-$ALZVersion = '1.8.0'
+$ALZVersion = '1.11.0'
 
 Import-Module (Join-Path $modulePath 'ALZUI.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZSecurity.psm1') -Force
@@ -63,6 +64,7 @@ Import-Module (Join-Path $modulePath 'ALZConfig.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZOrchestrator.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZPipeline.psm1') -Force
 Import-Module (Join-Path $modulePath 'ALZReport.psm1') -Force
+Import-Module (Join-Path $modulePath 'ALZWorkload.psm1') -Force
 
 if ($ConnectivityOnly) {
     Write-ALZSection 'Bootstrap connectivity (all supported public services)'
@@ -116,6 +118,8 @@ else {
     Write-ALZStatus -Status INFO -Message "Using delivery folder: $DeliveryPath"
 }
 
+Show-ALZReleaseStatus -DeliveryPath $DeliveryPath -SkipOnline:$SkipUpdateCheck
+
 # ---- Load or initialize state ------------------------------------------
 $state = $null
 if (-not $Reset) { $state = Get-ALZState -DeliveryPath $DeliveryPath }
@@ -127,18 +131,41 @@ if ($state) {
         if (Read-ALZConfirm -Prompt 'Start over from scratch (discards saved answers)?' -Default $false) {
             $state = New-ALZState -DeliveryPath $DeliveryPath
             Save-ALZState -State $state
+            $state = Set-ALZDeliveryType -State $state
         }
+    }
+    # A saved delivery from before the custom-workload delivery type existed has no
+    # deliveryType at all. Default it to the only thing it could have been, rather
+    # than asking again mid-resume.
+    if (-not $state.answers.ContainsKey('deliveryType') -or -not $state.answers.deliveryType) {
+        $state.answers['deliveryType'] = 'landingzone'
+        Save-ALZState -State $state
     }
 }
 else {
     $state = New-ALZState -DeliveryPath $DeliveryPath
     Save-ALZState -State $state
     Write-ALZStatus -Status INFO -Message 'Started a new delivery.'
+    # Only a genuinely new delivery is asked - never on resume (see above).
+    $state = Set-ALZDeliveryType -State $state
 }
 $skip = @(); if ($state.answers.stateBackend -ne 'hcp') { $skip = @('hcp') }
 
 Add-ALZStat -State $state -Name 'sessions'
 Save-ALZState -State $state
+
+# Kept out of Invoke-ALZInterview deliberately: the two paths share almost
+# nothing once topology/scenario is out of the picture, and dispatching here
+# means the existing landing-zone phases below never run for a workload
+# delivery (see modules/ALZWorkload.psm1).
+if ($state.answers.deliveryType -eq 'workload') {
+    Invoke-ALZWorkloadDelivery -State $state -DataPath $dataPath
+    return
+}
+if ($state.answers.deliveryType -eq 'maintenance') {
+    Show-ALZMaintenanceReview -State $state
+    return
+}
 
 # ---- Phase: Interview --------------------------------------------------
 if (-not (Test-ALZAnswersComplete -State $state) -or $state.phaseStatus.interview -ne 'done') {
