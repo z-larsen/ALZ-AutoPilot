@@ -227,10 +227,24 @@ function Write-ALZTargetState {
     & $row 'State backend' $(if ($Answers.stateBackend -eq 'hcp') { "HCP Terraform ($($Answers.hcpOrg)/$($Answers.hcpWorkspace), Local mode)" } else { 'Azure Storage (created by bootstrap)' })
     & $row 'Runners' $(if ($Answers.selfHostedRunners) { 'Self-hosted in a VNet (private networking)' } elseif ($Answers.vcs -eq 'azuredevops') { 'Microsoft-hosted agents' } else { 'GitHub-hosted' })
     & $row 'Apply approvers' ($Answers.applyApprovers -join ', ')
+    if ($Answers.networking -and $Answers.networking.Count -gt 0) {
+        & $head 'Requested platform networking'
+        & $row 'DDoS protection plan' ([string]$Answers.networking.ddosProtectionPlanEnabled)
+        foreach ($regionKey in $Answers.networking.regions.Keys) {
+            $network = $Answers.networking.regions[$regionKey]
+            & $row "$regionKey gateways" "VPN=$($network.vpnGatewayEnabled), ExpressRoute=$($network.expressRouteGatewayEnabled)"
+            & $row "$regionKey inspection" $(if ($network.firewallSku) { "Azure Firewall $($network.firewallSku)" } else { 'NVA (vendor deployment and routing required)' })
+            & $row "$regionKey firewall NAT" $(if ($network.natGatewayEnabled) { "Enabled ($($network.natGatewaySku))" } else { 'Disabled' })
+        }
+        Write-Host '   Gateway connections, IP ranges, routing, and NVA setup still need review.' -ForegroundColor DarkGray
+    }
     if ($Scenario -and $null -ne $Scenario.estimatedMonthlyUsd) {
         $cost = if ($Scenario.estimatedMonthlyUsd -eq 0) { 'no fixed infrastructure cost' } else { ('~${0:N0} / month' -f $Scenario.estimatedMonthlyUsd) }
         $note = if ($Scenario.excludesNvaLicence) { ' (excludes the NVA licence)' } else { '' }
-        & $row 'Est. topology cost' "$cost$note" $(if ($Scenario.estimatedMonthlyUsd -gt 1000) { 'Yellow' } else { 'Green' })
+        & $row 'Scenario baseline cost' "$cost$note" $(if ($Scenario.estimatedMonthlyUsd -gt 1000) { 'Yellow' } else { 'Green' })
+        if ($Answers.networking -and $Answers.networking.Count -gt 0) {
+            Write-Host '   Baseline only: not recalculated for your gateway, DDoS, firewall, or NAT selections.' -ForegroundColor Yellow
+        }
     }
     # Private networking deploys its own billable infrastructure (container registry,
     # container instances, NAT gateway, public IP, private endpoints) that the scenario

@@ -41,6 +41,125 @@ function Get-ALZSemver {
     return $null
 }
 
+function Test-ALZConnectivity {
+    param(
+        [ValidateSet('github', 'azuredevops', 'all')][string]$Vcs = 'github',
+        [ValidateSet('terraform', 'bicep')][string]$IacType = 'terraform',
+        [ValidateSet('azurerm', 'hcp')][string]$StateBackend = 'azurerm',
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
+    $doc = 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/'
+    $proxyNames = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy') |
+        Where-Object { [Environment]::GetEnvironmentVariable($_) } | Select-Object -Unique
+    if ($proxyNames) {
+        New-ALZCheckResult 'Proxy configuration' 'WARN' "Proxy environment variables are set: $($proxyNames -join ', '). Values are not displayed." 'The accelerator does not explicitly support corporate proxies. Use an approved execution environment or work with your network team. Passing these PowerShell probes does not validate Git, Azure CLI, Terraform, or runner proxy settings.' $doc
+    }
+    $endpoints = @(
+        @{ Name = 'Microsoft Entra sign-in'; Uri = 'https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration'; Method = 'Get'; ContentType = 'json' }
+        @{ Name = 'Azure Resource Manager'; Uri = 'https://management.azure.com/tenants?api-version=2022-12-01'; Method = 'Get'; AllowUnauthorized = $true }
+        @{ Name = 'Microsoft Graph'; Uri = 'https://graph.microsoft.com/v1.0/organization'; Method = 'Get'; AllowUnauthorized = $true }
+        @{ Name = 'PowerShell Gallery feed'; Uri = 'https://www.powershellgallery.com/api/v2/FindPackagesById()?id=%27ALZ%27&$filter=IsLatestVersion'; Method = 'Get'; ContentType = 'xml'; PackageFeed = $true }
+        @{ Name = 'GitHub API'; Uri = 'https://api.github.com/repos/Azure/ALZ-PowerShell-Module/releases/latest'; ContentType = 'json' }
+        @{ Name = 'GitHub source'; Uri = 'https://raw.githubusercontent.com/Azure/ALZ-PowerShell-Module/main/README.md'; ContentType = 'text/plain' }
+        @{ Name = 'GitHub archive download'; Uri = 'https://github.com/Azure/ALZ-PowerShell-Module/archive/refs/heads/main.zip'; ContentType = 'zip' }
+        @{ Name = 'Bootstrap sample release download'; Uri = 'https://github.com/Azure/accelerator-bootstrap-modules/releases/download/v7.2.1/bootstrap_modules.zip'; ContentType = 'octet-stream|zip' }
+        @{ Name = 'Terraform downloads'; Uri = 'https://releases.hashicorp.com/terraform/index.json'; ContentType = 'json' }
+        @{ Name = 'Terraform Registry'; Uri = 'https://registry.terraform.io/.well-known/terraform.json'; ContentType = 'json' }
+    )
+    if ($Vcs -in @('azuredevops', 'all')) {
+        $endpoints += @{ Name = 'Azure DevOps'; Uri = 'https://dev.azure.com/'; AllowNotFound = $true }
+    }
+    if ($StateBackend -eq 'hcp') {
+        $endpoints += @{ Name = 'HCP Terraform'; Uri = 'https://app.terraform.io/.well-known/terraform.json'; ContentType = 'json' }
+    }
+    if ($IacType -eq 'bicep') {
+        $endpoints += @{ Name = 'Bicep release metadata'; Uri = 'https://api.github.com/repos/Azure/bicep/releases/latest'; ContentType = 'json' }
+    }
+
+    $pending = [System.Collections.Generic.Queue[hashtable]]::new()
+    foreach ($endpoint in $endpoints) { $pending.Enqueue($endpoint) }
+    while ($pending.Count -gt 0) {
+        $endpoint = $pending.Dequeue()
+        $hostName = ([uri]$endpoint.Uri).Host
+        $method = if ($endpoint.Method) { $endpoint.Method } else { 'Head' }
+        try {
+            $response = Invoke-WebRequest -Uri $endpoint.Uri -Method $method -SkipHttpErrorCheck -MaximumRedirection 5 -ConnectionTimeoutSeconds $TimeoutSeconds -OperationTimeoutSeconds $TimeoutSeconds -UserAgent 'ALZ-Autopilot-Preflight' -ErrorAction Stop
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -eq 407) {
+                New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Proxy authentication required (HTTP 407)." 'Have your network team configure approved proxy authentication for this process, or use a supported execution environment. Do not paste proxy credentials into delivery files.' $doc
+            }
+            elseif ($statusCode -eq 401 -and $endpoint.AllowUnauthorized) {
+                New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS reachable (HTTP 401 is expected without credentials). Access permissions are checked separately."
+            }
+            elseif ($statusCode -eq 404 -and $endpoint.AllowNotFound) {
+                New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS reachable (HTTP 404 is expected at the service root). Organization access is unverified."
+            }
+            elseif ($statusCode -ge 200 -and $statusCode -lt 300) {
+                $contentType = [string]($response.Headers['Content-Type'] -join ';')
+                if ($endpoint.ContentType -and $contentType -and $contentType -notmatch $endpoint.ContentType) {
+                    New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Unexpected response type; the request may have reached a proxy sign-in or block page." 'Ask your network team to allow the service and its download redirects. A successful HTTP status alone does not confirm download access.' $doc
+                }
+                else {
+                    if ($endpoint.PackageFeed) {
+                        $feed = [System.Xml.XmlDocument]::new()
+                        $feed.XmlResolver = $null
+                        $feed.LoadXml($response.Content)
+                        $versionNode = $feed.SelectSingleNode("//*[local-name()='Version']")
+                        if (-not $versionNode -or $versionNode.InnerText -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+                            New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - The feed did not return a valid ALZ package version." 'Check PowerShell Gallery availability and whether the proxy rewrote the metadata response.' $doc
+                            continue
+                        }
+                        $pending.Enqueue(@{ Name = 'ALZ module download'; Uri = "https://cdn.powershellgallery.com/packages/alz.$($versionNode.InnerText).nupkg"; ContentType = 'octet-stream|zip' })
+                    }
+                    New-ALZCheckResult $endpoint.Name 'OK' "$hostName - HTTPS $method succeeded (HTTP $statusCode)."
+                }
+            }
+            elseif ($method -eq 'Head' -and $statusCode -in @(405, 501)) {
+                New-ALZCheckResult $endpoint.Name 'WARN' "$hostName - HEAD probe is not supported (HTTP $statusCode); download access is unverified." 'Check the download from the same shell. No installer or archive was downloaded by this probe.' $doc
+            }
+            else {
+                New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - Request rejected (HTTP $statusCode)." 'Check outbound HTTPS, proxy allowlists, service availability, and download redirects with your network team. For HTTP 429, retry after the service rate limit clears.' $doc
+            }
+        }
+        catch {
+            $failure = $_.Exception
+            $category = 'Connection failed'
+            while ($failure) {
+                if ($failure -is [System.Security.Authentication.AuthenticationException]) {
+                    $category = 'TLS certificate or handshake failed'
+                    break
+                }
+                if ($failure -is [System.TimeoutException] -or $failure -is [System.OperationCanceledException]) {
+                    $category = 'Request timed out'
+                    break
+                }
+                if ($failure -is [System.Net.Sockets.SocketException] -and $failure.SocketErrorCode -in @('HostNotFound', 'NoData', 'TryAgain')) {
+                    $category = 'DNS resolution failed'
+                    break
+                }
+                if ($failure -is [System.Net.Http.HttpRequestException] -and $failure.StatusCode -eq 407) {
+                    $category = 'Proxy authentication required'
+                    break
+                }
+                if ($failure -is [System.Net.Http.HttpRequestException] -and $failure.HttpRequestError -eq 'ProxyTunnelError') {
+                    $category = 'Proxy HTTPS tunnel failed'
+                    break
+                }
+                $failure = $failure.InnerException
+            }
+            $remediation = switch -Regex ($category) {
+                'TLS' { 'Confirm the certificate chain and TLS inspection policy with your network team. Use approved trust stores for each tool; do not disable certificate verification.' }
+                'Proxy' { 'Check approved proxy authentication and HTTPS CONNECT access with your network team. Do not place credentials in delivery files.' }
+                'DNS' { 'Check DNS resolution, VPN connectivity, and the configured proxy from this execution environment.' }
+                'timed out' { 'Check outbound TCP 443, the proxy, and service availability. Retry after resolving the connection issue.' }
+                default { 'Check DNS, outbound TCP 443, proxy authentication, certificate trust, and redirect access in this execution environment.' }
+            }
+            New-ALZCheckResult $endpoint.Name 'FAIL' "$hostName - $category." $remediation $doc
+        }
+    }
+    New-ALZCheckResult 'Connectivity scope' 'INFO' 'Unauthenticated PowerShell metadata GETs and download HEAD probes only; no tools were installed and no Azure resources were changed.' 'These checks do not verify complete downloads, organization permissions, sovereign cloud endpoints, private state storage, or connectivity from deployed runners. Git, Azure CLI, and Terraform can use different proxy settings and certificate stores.' $doc
+}
+
 function Test-ALZTooling {
     $results = @()
 
@@ -170,6 +289,69 @@ function Register-ALZResourceProviders {
     }
 }
 
+function Get-ALZGitHubSecurityFindings {
+    param([System.Collections.IDictionary]$Snapshot, [ValidateSet('learning', 'production')][string]$Profile = 'production')
+    $riskStatus = if ($Profile -eq 'production') { 'FAIL' } else { 'WARN' }
+    $plan = [string]$Snapshot.Organization.plan.name
+    $environmentDoc = 'https://docs.github.com/en/actions/reference/deployments-and-environments'
+    $secureDoc = 'https://docs.github.com/en/actions/reference/security/secure-use'
+    if ($Snapshot.Repository.private -ne $true) { New-ALZCheckResult 'Private workload repository' 'FAIL' 'Private repository access is absent or unverified.' 'Keep workload code and sensitive plan artifacts in a private repository.' $secureDoc }
+    else { New-ALZCheckResult 'Private workload repository' 'OK' 'Repository is private. This does not prevent authorized readers from cloning it.' }
+    if ($Snapshot.Organization.two_factor_requirement_enabled -ne $true) { New-ALZCheckResult 'Organization 2FA' $riskStatus 'Organization-wide 2FA is disabled or could not be verified.' 'Review account recovery and collaborators before enforcing secure 2FA. AutoPilot does not change this setting.' $secureDoc }
+    else { New-ALZCheckResult 'Organization 2FA' 'OK' 'Organization requires 2FA.' }
+    if ($Snapshot.Organization.default_repository_permission -ne 'none' -or $Snapshot.Organization.members_can_create_public_repositories -ne $false) { New-ALZCheckResult 'Organization access' $riskStatus 'Least-privilege base access or public repository creation restrictions are absent or unverified.' 'Review base permission None and explicit team grants; restrict public repository creation.' $secureDoc }
+    foreach ($entry in @(@{ Name = 'Workload'; Protection = $Snapshot.Protection }, @{ Name = 'Reusable workflow'; Protection = $Snapshot.TemplateProtection })) {
+        $protection = $entry.Protection
+        if ($protection.required_pull_request_reviews.required_approving_review_count -lt 1 -or $protection.enforce_admins.enabled -ne $true) { New-ALZCheckResult "$($entry.Name) PR review" $riskStatus 'Independent PR review and administrator enforcement are absent or unverified.' 'Require PR review and enforce protections. If rulesets enforce this instead, inspect them separately; this check does not certify ruleset equivalence.' $secureDoc }
+        if ($protection.required_pull_request_reviews.require_code_owner_reviews -ne $true) { New-ALZCheckResult "$($entry.Name) code ownership" $riskStatus 'Code-owner review is absent or unverified.' 'Protect workflows, access configuration and CODEOWNERS with required owner review.' $secureDoc }
+        if (@($protection.required_status_checks.contexts).Where({ $_ }).Count + @($protection.required_status_checks.checks).Where({ $_ }).Count -lt 1) { New-ALZCheckResult "$($entry.Name) required checks" $riskStatus 'Required status checks are absent or unverified.' 'Require the actual applicable validation checks; do not select path-filtered checks that never run for some PRs.' $secureDoc }
+        if ($protection.allow_force_pushes.enabled -ne $false -or $protection.allow_deletions.enabled -ne $false) { New-ALZCheckResult "$($entry.Name) history protection" $riskStatus 'Force-push and deletion protection are absent or unverified.' 'Protect the default branch against force pushes and deletion.' $secureDoc }
+    }
+    if ($Snapshot.Actions.default_workflow_permissions -ne 'read' -or $Snapshot.Actions.can_approve_pull_request_reviews -ne $false) { New-ALZCheckResult 'Workflow token defaults' $riskStatus 'Read-only defaults and disabled automated approvals are absent or unverified.' 'Use read-only defaults and keep workflow PR approvals disabled. Individual jobs can request extra permissions; review workflow code.' $secureDoc }
+    $policy = $Snapshot.Environment.deployment_branch_policy
+    $rules = @($Snapshot.EnvironmentBranches.branch_policies)
+    if ($policy.custom_branch_policies -ne $true -or $rules.Count -ne 1 -or $rules[0].name -cne $Snapshot.Branch -or $rules[0].type -cne 'branch') { New-ALZCheckResult 'Apply branch restriction' $riskStatus 'An exact default-branch-only apply environment could not be verified.' 'Configure a selected branch rule for the default branch on the apply environment. Do not apply that restriction to PR-plan environments.' $environmentDoc }
+    else { New-ALZCheckResult 'Apply branch restriction' 'OK' 'The apply environment allows only the selected default branch.' }
+    $reviewRules = @($Snapshot.Environment.protection_rules | Where-Object type -EQ 'required_reviewers')
+    if ($plan -in @('free', 'team', 'pro')) {
+        New-ALZCheckResult 'Deployment approval capability' $riskStatus "GitHub $plan does not support required deployment reviewers for private repositories. Manual dispatch is not independent approval." 'Use an Enterprise private-environment gate or a separately governed deployment system. Learning mode may prepare a proposal, but does not claim independent approval.' $environmentDoc
+    }
+    elseif ($plan -notin @('enterprise', 'business') -or $reviewRules.Count -ne 1 -or @($reviewRules[0].reviewers).Count -lt 1 -or $reviewRules[0].prevent_self_review -ne $true -or $Snapshot.Environment.can_admins_bypass -ne $false) {
+        New-ALZCheckResult 'Deployment approval capability' $riskStatus 'Plan capability, independent environment reviewers, self-review prevention or no-bypass enforcement is unverified.' 'Verify the actual apply environment rules. Do not infer approval protection merely because an environment exists.' $environmentDoc
+    }
+    else { New-ALZCheckResult 'Deployment approval capability' 'OK' 'Required environment reviewers, prevention of self-review and disabled administrator bypass are configured.' }
+    foreach ($name in $Snapshot.Unavailable) { New-ALZCheckResult "Security evidence: $name" $riskStatus 'The read-only API request was denied or returned incomplete data.' 'Inspect this setting manually. Do not expand token permissions automatically or treat missing evidence as a pass.' }
+}
+
+function Test-ALZWorkloadGitHubSecurity {
+    param([string]$Repository, [string]$Branch, [System.Collections.IDictionary]$Pipeline, [string]$Token)
+    if ($Repository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$' -or $Pipeline.templatesRepository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') { throw 'Select explicit workload and templates repositories for security review.' }
+    $profile = if ($Pipeline.securityProfile) { $Pipeline.securityProfile } else { 'production' }
+    $headers = @{ Authorization = "Bearer $Token"; 'User-Agent' = 'ALZ-AutoPilot'; Accept = 'application/vnd.github+json' }
+    $snapshot = @{ Branch = $Branch; Unavailable = @() }
+    $environment = [uri]::EscapeDataString($Pipeline.applyEnvironment)
+    $branchName = [uri]::EscapeDataString($Branch)
+    $requests = [ordered]@{
+        Organization = "orgs/$($Repository.Split('/')[0])"
+        Repository = "repos/$Repository"
+        Protection = "repos/$Repository/branches/$branchName/protection"
+        Templates = "repos/$($Pipeline.templatesRepository)"
+        Actions = "repos/$Repository/actions/permissions/workflow"
+        Environment = "repos/$Repository/environments/$environment"
+        EnvironmentBranches = "repos/$Repository/environments/$environment/deployment-branch-policies?per_page=100"
+    }
+    foreach ($request in $requests.GetEnumerator()) {
+        try { $snapshot[$request.Key] = Invoke-RestMethod -Uri "https://api.github.com/$($request.Value)" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop }
+        catch { $snapshot.Unavailable += $request.Key }
+    }
+    if ($snapshot.Templates.default_branch) {
+        try { $snapshot.TemplateProtection = Invoke-RestMethod -Uri "https://api.github.com/repos/$($Pipeline.templatesRepository)/branches/$([uri]::EscapeDataString($snapshot.Templates.default_branch))/protection" -Method Get -Headers $headers -TimeoutSec 15 -ErrorAction Stop }
+        catch { $snapshot.Unavailable += 'TemplateProtection' }
+    }
+    else { $snapshot.Unavailable += 'TemplateProtection' }
+    Get-ALZGitHubSecurityFindings -Snapshot $snapshot -Profile $profile
+}
+
 function Test-ALZGitHubToken {
     param([string]$Token, [string]$Org, [bool]$SelfHostedRunners)
     if (-not $Token) {
@@ -188,21 +370,22 @@ function Test-ALZGitHubToken {
         $orgInfo = Invoke-RestMethod -Uri "https://api.github.com/orgs/$Org" -Headers $headers -Method Get -ErrorAction Stop
         $planName = if ($orgInfo.plan) { $orgInfo.plan.name } else { 'unknown' }
         if ($planName -eq 'free') {
-            $results += New-ALZCheckResult "GitHub org: $Org" 'WARN' "Reachable (free plan)" 'A free org makes the accelerator repos public. Fine for a rehearsal; use a paid/EMU org for anything real.' 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
+            $results += New-ALZCheckResult "GitHub org: $Org" 'WARN' "Reachable (free plan)" 'The accelerator may create public repositories for a free organization. Do not publish customer configuration, state, plans or secrets. Use private repositories on a suitable paid plan for sensitive deployments.' 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
             # A free org forces public repos, and self-hosted runners then execute inside the
             # VNet that reaches the state storage. GitHub advises against that pairing because
             # a fork pull request can run code on the runner.
             if ($SelfHostedRunners) {
-                $results += New-ALZCheckResult 'Public repos + self-hosted runners' 'WARN' 'A free org makes the repos public, and self-hosted runners run inside your VNet' 'GitHub recommends self-hosted runners only on private repositories, because a fork pull request can run code on the runner, which here has private-endpoint access to the Terraform state. Mitigate by setting Settings > Actions > "Require approval for all external contributors", or remove the exposure with a paid org and private repos, or by not using self-hosted runners.' 'https://docs.github.com/en/actions/reference/security/secure-use'
+                $results += New-ALZCheckResult 'Public repos + self-hosted runners' 'WARN' 'Public repository code can execute inside a runner network with sensitive access.' 'Do not run untrusted PR code on persistent privileged runners. Use private repositories and isolated clean execution pools; external-contributor approval alone is not isolation.' 'https://docs.github.com/en/actions/reference/security/secure-use'
             }
         }
         else {
             $results += New-ALZCheckResult "GitHub org: $Org" 'OK' "Reachable (plan: $planName)"
         }
+        if ($planName -eq 'team') { $results += New-ALZCheckResult 'Private deployment approval' 'WARN' 'GitHub Team supports private environments, but not required deployment reviewers on private repositories.' 'Do not treat an environment or manual workflow dispatch as an independent approval gate. Enterprise is required for that private-repository feature.' 'https://docs.github.com/en/actions/reference/deployments-and-environments#required-reviewers' }
     }
     catch {
         $code = $_.Exception.Response.StatusCode.value__
-        $rem = if ($code -eq 403) { 'The org likely enforces SAML SSO. Authorize the token for the org on github.com/settings/tokens, or use a dedicated free org for rehearsals.' } else { "Confirm the org name is correct and the token's Resource owner is this org." }
+        $rem = "Confirm the organization, token resource owner, approval and required permissions. HTTP $code does not establish whether SSO is the cause; do not widen permissions automatically."
         $results += New-ALZCheckResult "GitHub org: $Org" 'FAIL' "Org not accessible (HTTP $code)" $rem 'https://azure.github.io/Azure-Landing-Zones/accelerator/1_prerequisites/github/'
     }
     # The accelerator reads org members and manages the approver team, which needs Organization > Members.
@@ -371,4 +554,4 @@ function Test-ALZHcpWorkspace {
     }
 }
 
-Export-ModuleMember -Function New-ALZCheckResult, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace
+Export-ModuleMember -Function New-ALZCheckResult, Test-ALZConnectivity, Test-ALZTooling, Test-ALZAzureLogin, Test-ALZSubscriptionAccess, Get-ALZProviderList, Test-ALZResourceProviders, Register-ALZResourceProviders, Get-ALZGitHubSecurityFindings, Test-ALZWorkloadGitHubSecurity, Test-ALZGitHubToken, Test-ALZAdoToken, Test-ALZExistingEstate, Test-ALZSubscriptionContent, Test-ALZHcpWorkspace

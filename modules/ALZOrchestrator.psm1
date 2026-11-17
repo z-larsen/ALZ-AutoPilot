@@ -9,14 +9,14 @@
 # Date: Created for the ALZ Accelerator orchestrator app
 #
 # Description:
-# 1. Ensures the ALZ PowerShell module is installed/current.
+# 1. Checks official releases without changing installed versions.
 # 2. Runs Deploy-Accelerator against the generated inputs.yaml.
 # 3. Transcribes the run and matches failures against data/traps.json.
 # 4. Renders the HCP-migration steps and the day-2 operating model.
 # The accelerator itself is unchanged - this only orchestrates it.
 #
 # Prerequisites:
-# - PowerShell 7.4+, ALZ module (auto-installed if missing).
+# - PowerShell 7.4+, a reviewed ALZ module version for bootstrap.
 #
 # Usage: Imported by Start-ALZDelivery.ps1 via Import-Module.
 ###########################################################################
@@ -32,13 +32,77 @@ function Test-ALZModuleInstalled {
 function Install-ALZModuleIfNeeded {
     $m = Get-InstalledPSResource -Name ALZ -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $m) {
-        Write-Host '  Installing ALZ module...' -ForegroundColor Cyan
-        Install-PSResource -Name ALZ -TrustRepository -ErrorAction Stop
+        if (-not (Read-ALZConfirm -Prompt 'Install a reviewed ALZ PowerShell package version for bootstrap?' -Default $false)) { throw 'ALZ installation was not approved. No package was changed.' }
+        $version = Read-ALZValue -Prompt 'Exact stable ALZ PowerShell version to install' -Validator { param($Value) $Value -match '^\d+\.\d+\.\d+$' }
+        Install-PSResource -Name ALZ -Version $version -Repository PSGallery -TrustRepository -ErrorAction Stop
     }
     else {
-        Write-Host "  ALZ module present ($($m.Version)). Checking for updates..." -ForegroundColor Cyan
-        Update-PSResource -Name ALZ -ErrorAction SilentlyContinue
+        Write-Host "  Keeping installed ALZ PowerShell module $($m.Version). Package upgrades require a separate reviewed action." -ForegroundColor Cyan
     }
+}
+
+function Get-ALZReleaseStatus {
+    param([string]$DeliveryPath, [switch]$SkipOnline)
+    $installed = Get-Module -ListAvailable -Name ALZ | Sort-Object Version -Descending | Select-Object -First 1
+    $marker = @{}
+    $iac = 'terraform'
+    $markerStatus = ''
+    if ($DeliveryPath) {
+        $markerPath = Join-Path $DeliveryPath '.alz-version-data.json'
+        try {
+            if (Test-Path -LiteralPath $markerPath) { $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+            $statePath = Join-Path $DeliveryPath '.alz-delivery-state.json'
+            if (Test-Path -LiteralPath $statePath) { $iac = (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -ErrorAction Stop).answers.iacType }
+        }
+        catch { $marker = @{}; $markerStatus = 'Local version metadata could not be read.' }
+    }
+    $sources = @(
+        @{ Name = 'ALZ PowerShell'; Current = [string]$installed.Version; Uri = "https://www.powershellgallery.com/api/v2/FindPackagesById()?id=%27ALZ%27&`$filter=IsLatestVersion"; ReleaseUrl = 'https://www.powershellgallery.com/packages/ALZ'; Package = $true }
+        @{ Name = 'Bootstrap'; Current = $marker.bootstrapVersion; Uri = 'https://api.github.com/repos/Azure/accelerator-bootstrap-modules/releases/latest'; ReleaseUrl = 'https://github.com/Azure/accelerator-bootstrap-modules/releases' }
+        @{ Name = 'Terraform starter'; Current = $(if ($iac -ne 'bicep') { $marker.starterVersion }); Uri = 'https://api.github.com/repos/Azure/alz-terraform-accelerator/releases/latest'; ReleaseUrl = 'https://github.com/Azure/alz-terraform-accelerator/releases' }
+        @{ Name = 'Bicep starter'; Current = $(if ($iac -eq 'bicep') { $marker.starterVersion }); Uri = 'https://api.github.com/repos/Azure/alz-bicep-accelerator/releases/latest'; ReleaseUrl = 'https://github.com/Azure/alz-bicep-accelerator/releases' }
+    )
+    foreach ($source in $sources) {
+        $latest = ''
+        $status = 'Not checked (offline)'
+        if (-not $SkipOnline) {
+            try {
+                $response = Invoke-WebRequest -Uri $source.Uri -Method Get -Headers @{ 'User-Agent' = 'ALZ-AutoPilot-VersionCheck' } -ConnectionTimeoutSeconds 4 -OperationTimeoutSeconds 6 -MaximumRetryCount 0 -ErrorAction Stop
+                if ($source.Package) {
+                    $document = [xml]$response.Content
+                    $latest = $document.SelectSingleNode("//*[local-name()='properties']/*[local-name()='Version']").InnerText
+                }
+                else {
+                    $release = $response.Content | ConvertFrom-Json -ErrorAction Stop
+                    if ($release.draft -or $release.prerelease) { throw 'Not a stable release.' }
+                    $latest = [string]$release.tag_name
+                }
+                if ($latest -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Unrecognized stable version.' }
+                $status = 'Available; not selected'
+                if ($source.Current -match '^v?\d+\.\d+\.\d+$') {
+                    $currentVersion = [version]([string]$source.Current).TrimStart('v')
+                    $latestVersion = [version]$latest.TrimStart('v')
+                    $status = if ($latestVersion -gt $currentVersion) { 'Newer release available' } elseif ($latestVersion -eq $currentVersion) { 'Matches latest stable' } else { 'Local version is newer than feed' }
+                }
+            }
+            catch { $latest = ''; $status = 'Unavailable; versions unchanged' }
+        }
+        [pscustomobject]@{ Component = $source.Name; LocalVersion = [string]$source.Current; LatestStable = $latest; Status = $status; ReleaseUrl = $source.ReleaseUrl; MetadataWarning = $markerStatus }
+    }
+}
+
+function Show-ALZReleaseStatus {
+    param([string]$DeliveryPath, [switch]$SkipOnline)
+    Write-ALZSection 'Official releases (read-only notice)'
+    foreach ($release in Get-ALZReleaseStatus -DeliveryPath $DeliveryPath -SkipOnline:$SkipOnline) {
+        $local = if ($release.LocalVersion) { $release.LocalVersion } else { 'not recorded' }
+        $latest = if ($release.LatestStable) { $release.LatestStable } else { 'unknown' }
+        Write-Host "  $($release.Component): local $local; latest $latest. $($release.Status)"
+        Write-Host "    $($release.ReleaseUrl)" -ForegroundColor DarkGray
+        if ($release.MetadataWarning) { Write-ALZStatus -Status WARN -Message $release.MetadataWarning }
+    }
+    Write-Host '  No installation, upgrade or state change was performed. Cached starter versions are not proof of deployed module versions.'
+    Write-Host '  Terraform module versions and provider locks are reviewed in the selected repository after choosing a delivery path.'
 }
 
 function Resolve-ALZError {
@@ -82,25 +146,14 @@ function Invoke-ALZBootstrap {
     $configPaths = @($inputsPath)
     if (Test-Path $platformConfig) { $configPaths += $platformConfig }
 
-    # Self-heal a partial module download. The accelerator records the extracted module
-    # versions in .alz-version-data.json and trusts it: if the marker claims a bootstrap
-    # version is present but the extracted module is gone (deleted bootstrap/ folder, or an
-    # interrupted prior run), it skips re-downloading and then dies with
-    # "The config file does not exist at ...\.config\ALZ-Powershell.config.json".
-    # Detect that mismatch and clear the marker + module folders so it re-downloads cleanly.
     $versionMarker = Join-Path $State.deliveryPath '.alz-version-data.json'
     if (Test-Path $versionMarker) {
         try {
             $vd = Get-Content -Path $versionMarker -Raw | ConvertFrom-Json
             $bootCfg = Join-Path $State.deliveryPath "bootstrap\$($vd.bootstrapVersion)\.config\ALZ-Powershell.config.json"
-            if ($vd.bootstrapVersion -and -not (Test-Path $bootCfg)) {
-                Write-ALZStatus -Status WARN -Message 'Partial module download detected - healing before bootstrap' -Detail 'Version marker present but the bootstrap module is missing; clearing marker and stale module folders so the accelerator re-downloads.'
-                Remove-Item -Path $versionMarker -Force -ErrorAction SilentlyContinue
-                Remove-Item -Path (Join-Path $State.deliveryPath 'bootstrap') -Recurse -Force -ErrorAction SilentlyContinue
-                Remove-Item -Path (Join-Path $State.deliveryPath 'starter') -Recurse -Force -ErrorAction SilentlyContinue
-            }
+            if ($vd.bootstrapVersion -and -not (Test-Path $bootCfg)) { throw 'The recorded bootstrap download is incomplete. Recover the same pinned release without deleting delivery folders, version records or Terraform state.' }
         }
-        catch { }
+        catch { throw 'Bootstrap version metadata is unreadable or its pinned files are missing. Stop for recovery; no delivery files were deleted.' }
     }
 
     # Supply the PAT only as a session env var - never persisted.
@@ -295,4 +348,4 @@ function Show-ALZManualSteps {
     Write-Host '  Cleanup FAQ:         https://azure.github.io/Azure-Landing-Zones/accelerator/faq/cleanup/' -ForegroundColor DarkCyan
 }
 
-Export-ModuleMember -Function Test-ALZModuleInstalled, Install-ALZModuleIfNeeded, Resolve-ALZError, Invoke-ALZBootstrap, Show-ALZHcpSteps, Show-ALZRunSteps, Show-ALZManualSteps
+Export-ModuleMember -Function Test-ALZModuleInstalled, Install-ALZModuleIfNeeded, Get-ALZReleaseStatus, Show-ALZReleaseStatus, Resolve-ALZError, Invoke-ALZBootstrap, Show-ALZHcpSteps, Show-ALZRunSteps, Show-ALZManualSteps
