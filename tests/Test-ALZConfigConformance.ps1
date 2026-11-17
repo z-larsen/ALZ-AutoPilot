@@ -20,6 +20,7 @@
 # ── Parameters ──────────────────────────────────────────────
 # ModulesRoot        Folder holding the extracted bootstrap modules
 # Quiet              Print only the summary line
+# RequireSchema      Fail instead of skipping when a reference schema is missing
 #
 # Prerequisites:
 # - PowerShell 7.4+
@@ -33,7 +34,8 @@
 [CmdletBinding()]
 param(
     [string]$ModulesRoot,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$RequireSchema
 )
 
 Set-StrictMode -Version Latest
@@ -110,6 +112,10 @@ Write-Host ''
 
 $alzModuleRoot = Resolve-ModulesRoot -Explicit $ModulesRoot
 if (-not $alzModuleRoot) {
+    if ($RequireSchema) {
+        Write-Result 'FAIL' 'No extracted bootstrap module found.' 'Supply -ModulesRoot with the reference schema for this validation run.'
+        exit 1
+    }
     Write-Result 'SKIP' 'No extracted bootstrap module found.' 'Run a bootstrap once, or pass -ModulesRoot pointing at the folder containing github\variables.tf.'
     Write-Host ''
     Write-Host '  Skipped: nothing to validate against.' -ForegroundColor Yellow
@@ -122,7 +128,13 @@ try {
     foreach ($vcs in @('github', 'azuredevops')) {
         $varsFile = Join-Path $alzModuleRoot "$vcs\variables.tf"
         if (-not (Test-Path -LiteralPath $varsFile)) {
-            Write-Result 'SKIP' "$vcs - variables.tf not present in this module version"
+            if ($RequireSchema) {
+                $failures.Add("$vcs - required schema is missing")
+                Write-Result 'FAIL' "$vcs - required variables.tf is missing"
+            }
+            else {
+                Write-Result 'SKIP' "$vcs - variables.tf not present in this module version"
+            }
             continue
         }
         $declared = Get-ALZTfVariable -Path $varsFile

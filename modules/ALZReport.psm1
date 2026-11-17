@@ -95,6 +95,17 @@ function New-ALZDeliveryReport {
     & $addRow 'Parent management group' $(if ($a.parentManagementGroupId) { $a.parentManagementGroupId } else { 'Tenant Root Group' })
     & $addRow 'Security contact' $a.securityContactEmail
     & $addRow 'Apply approvers' ($a.applyApprovers -join ', ')
+    if ($a.networking -and $a.networking.Count -gt 0) {
+        & $addRow 'Requested DDoS plan' ([string]$a.networking.ddosProtectionPlanEnabled)
+        foreach ($regionKey in $a.networking.regions.Keys) {
+            $network = $a.networking.regions[$regionKey]
+            $inspection = if ($network.firewallSku) { "Azure Firewall $($network.firewallSku)" } else { 'NVA (separate vendor deployment)' }
+            & $addRow "$regionKey network request" "VPN=$($network.vpnGatewayEnabled); ExpressRoute=$($network.expressRouteGatewayEnabled); $inspection; firewall NAT=$($network.natGatewayEnabled) ($($network.natGatewaySku))"
+        }
+        if ($a.networkSettingsAppliedJson -ne ($a.networking | ConvertTo-Json -Depth 10 -Compress)) {
+            & $addRow 'Networking configuration' 'Requested choices have not been generated into the preserved platform config. Review the actual file.'
+        }
+    }
     $targetRows = $script:tmpRows -join "`n"
 
     # --- Subscriptions ----------------------------------------------------
@@ -147,21 +158,20 @@ function New-ALZDeliveryReport {
     if ($Platform -and $Platform.PSObject.Properties.Name -contains 'Assignments') { $assignments = @($Platform.Assignments) }
 
     $policyIntro = @'
-<p class="note">These come from the Azure Landing Zones policy baseline, Microsoft's recommended
-starting point. You are not expected to have chosen them. Most are <strong>Audit</strong> or
-<strong>DeployIfNotExists</strong>, which report on or remediate resources rather than blocking
-them, so the baseline is safe to run first and tune later. Changing any of it is a day-2 edit to
-the platform config in the module repo, reviewed as a pull request and applied through the same
-approval gate.</p>
+<p class="note">This inventory can include existing assignments as well as the Azure Landing Zones
+baseline. Review effects and scope before applying policies to a populated tenant. <strong>Deny</strong>
+can block non-compliant create or update requests. <strong>DeployIfNotExists</strong> can act after
+create or update; existing resources require a remediation task. Review policy changes through the
+platform repository's pull request and apply approval gates.</p>
 '@
 
     if ($assignments.Count -eq 0) {
         $policySection = @"
 <h2>Policy baseline</h2>
 $policyIntro
-<p class="note"><strong>Nothing assigned yet.</strong> Policy is deployed by the
-&quot;02 Continuous Delivery&quot; pipeline, not by the bootstrap. Run the pipeline, then re-run
-ALZ Autopilot to produce a report with the full inventory.</p>
+<p class="note"><strong>No assignments recorded in this snapshot.</strong> The pipeline may not
+have run, or inventory access may be unavailable. Policy deploys through the platform pipeline,
+not the bootstrap. Check access and the pipeline result, then re-run for an updated inventory.</p>
 "@
     }
     else {
@@ -334,7 +344,9 @@ $targetRows
 $subRows
   </table>
 
-  <h2>Deployed</h2>
+  <h2>Observed Azure inventory</h2>
+  <p class="note">This is a read-only snapshot, not proof that this session deployed these resources.
+  Check the pipeline result and phase statuses before treating the delivery as complete.</p>
   <table>
 $deployedRows
   </table>
@@ -368,4 +380,43 @@ $statRows
     return $path
 }
 
-Export-ModuleMember -Function New-ALZDeliveryReport
+function Complete-ALZDelivery {
+    param(
+        [hashtable]$State,
+        $Platform,
+        $Run,
+        $Repo,
+        [datetime]$SessionStart,
+        [string]$DataPath,
+        [string]$AppVersion
+    )
+    $resourceGroups = @()
+    if ($State.answers.subscriptions.management) {
+        try {
+            $resourceGroups = @(az group list --subscription $State.answers.subscriptions.management -o json 2>$null |
+                ConvertFrom-Json | Where-Object { $_.name -like 'rg-alz*' } | ForEach-Object { $_.name } | Sort-Object)
+        }
+        catch { Write-ALZStatus -Status WARN -Message 'Could not read the management subscription resource groups.' }
+    }
+    if (-not $Platform) {
+        try { $Platform = Test-ALZPlatformDeployed }
+        catch { Write-ALZStatus -Status WARN -Message 'Azure inventory is unavailable; the report will retain pending phases.' }
+    }
+    if (@($script:ReportPhaseOrder | Where-Object { $State.phaseStatus[$_] -notin @('done', 'skipped') }).Count -eq 0) {
+        Set-ALZCurrentPhase -State $State -Phase 'complete'
+    }
+    Save-ALZState -State $State
+    $reportPath = $null
+    try {
+        $reportPath = New-ALZDeliveryReport -State $State -Platform $Platform -Run $Run -ResourceGroups $resourceGroups -Repo $Repo -SessionStart $SessionStart -DataPath $DataPath -AppVersion $AppVersion
+    }
+    catch { Write-ALZStatus -Status WARN -Message 'Could not write the HTML report.' -Detail $_.Exception.Message }
+    Write-ALZSummary -State $State -Platform $Platform -Run $Run -ResourceGroups $resourceGroups -Repo $Repo -SessionStart $SessionStart -ReportPath $reportPath
+    if ($reportPath -and (Read-ALZConfirm -Prompt 'Open the delivery report now?' -Default $false)) {
+        try { Start-Process $reportPath }
+        catch { Write-ALZStatus -Status WARN -Message 'Could not open the report automatically.' -Detail $reportPath }
+    }
+    Write-ALZStatus -Status INFO -Message 'Session finished. State saved; unverified deployment phases remain pending.'
+}
+
+Export-ModuleMember -Function New-ALZDeliveryReport, Complete-ALZDelivery
