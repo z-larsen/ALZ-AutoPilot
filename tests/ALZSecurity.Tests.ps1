@@ -15,7 +15,8 @@ AfterAll {
 Describe 'ConvertTo-ALZPlainText' {
     It 'returns the original plain text for an ordinary synthetic secret' {
         $expected = 'SYNTH-Ordinary-Secret-123'
-        $secure = ConvertTo-SecureString $expected -AsPlainText -Force
+        $secure = [System.Security.SecureString]::new()
+        foreach ($character in $expected.ToCharArray()) { $secure.AppendChar($character) }
 
         ConvertTo-ALZPlainText -Secure $secure | Should -BeExactly $expected
     }
@@ -30,7 +31,8 @@ Describe 'ConvertTo-ALZPlainText' {
 
     It 'preserves special characters in a synthetic secret' {
         $expected = ('SYNTH-[[]]-"-\' + "`n" + '-END')
-        $secure = ConvertTo-SecureString $expected -AsPlainText -Force
+        $secure = [System.Security.SecureString]::new()
+        foreach ($character in $expected.ToCharArray()) { $secure.AppendChar($character) }
 
         ConvertTo-ALZPlainText -Secure $secure | Should -BeExactly $expected
     }
